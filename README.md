@@ -217,6 +217,169 @@ go-data-checksum 提供了增强的跟踪功能，允许用户更精确地监控
 
 通过以上选项，用户可以将跟踪信息存储到指定的 MySQL 数据库中，或者输出到指定的日志文件中。跟踪信息包括但不限于：核对开始时间、结束时间、持续时长、处理的表名、记录数等。
 
+## Testing
+
+```bash
+# First, find the middle range of IDs
+mysql --defaults-group-suffix=_replica1 -e "SELECT MIN(id) as min_id, MAX(id) as max_id, COUNT(*) as total FROM sbtest.sbtest3"
+
+# Delete 5 records from around the middle (assuming IDs are roughly 1-100000)
+mysql --defaults-group-suffix=_replica1 -e "DELETE FROM sbtest.sbtest3 WHERE id BETWEEN 50000 AND 50004 LIMIT 5"
+
+# Verify the deletion
+mysql --defaults-group-suffix=_replica1 -e "SELECT COUNT(*) FROM sbtest.sbtest3"
+mysql --defaults-group-suffix=_replica1 -e "SELECT id FROM sbtest.sbtest3 WHERE id BETWEEN 49995 AND 50010 ORDER BY id"
+
+mysql --defaults-group-suffix=_replica1 -e "SELECT MIN(id) as min_id, MAX(id) as max_id, COUNT(*) as total FROM sbtest.sbtest3"
++--------+--------+--------+
+| min_id | max_id | total  |
++--------+--------+--------+
+|      1 | 100000 | 100000 |
++--------+--------+--------+
+
+mysql --defaults-group-suffix=_replica1 -e "DELETE FROM sbtest.sbtest3 WHERE id BETWEEN 50000 AND 50004 LIMIT 5"
+
+mysql --defaults-group-suffix=_replica1 -e "SELECT COUNT(*) FROM sbtest.sbtest3"
++----------+
+| COUNT(*) |
++----------+
+|    99995 |
++----------+
+
+mysql --defaults-group-suffix=_replica1 -e "SELECT id FROM sbtest.sbtest3 WHERE id BETWEEN 49995 AND 50010 ORDER BY id"
++-------+
+| id    |
++-------+
+| 49995 |
+| 49996 |
+| 49997 |
+| 49998 |
+| 49999 |
+| 50005 |
+| 50006 |
+| 50007 |
+| 50008 |
+| 50009 |
+| 50010 |
++-------+
+```
+
+## Result
+```bash
+time="2025-06-06T11:39:39-07:00" level=info msg="Staring go-data-checksum dev..."
+time="2025-06-06T11:39:39-07:00" level=info msg="24 pairs of source and target tables:"
+time="2025-06-06T11:39:39-07:00" level=info msg="Table map: sbtest.sbtest1 => sbtest.sbtest1 ."
+time="2025-06-06T11:39:39-07:00" level=info msg="Table map: sbtest.sbtest10 => sbtest.sbtest10 ."
+time="2025-06-06T11:39:39-07:00" level=info msg="Table map: sbtest.sbtest11 => sbtest.sbtest11 ."
+time="2025-06-06T11:39:39-07:00" level=info msg="Table map: sbtest.sbtest12 => sbtest.sbtest12 ."
+time="2025-06-06T11:39:39-07:00" level=info msg="Table map: sbtest.sbtest13 => sbtest.sbtest13 ."
+time="2025-06-06T11:39:39-07:00" level=info msg="Table map: sbtest.sbtest14 => sbtest.sbtest14 ."
+time="2025-06-06T11:39:39-07:00" level=info msg="Table map: sbtest.sbtest15 => sbtest.sbtest15 ."
+time="2025-06-06T11:39:39-07:00" level=info msg="Table map: sbtest.sbtest16 => sbtest.sbtest16 ."
+time="2025-06-06T11:39:39-07:00" level=info msg="Table map: sbtest.sbtest17 => sbtest.sbtest17 ."
+time="2025-06-06T11:39:39-07:00" level=info msg="Table map: sbtest.sbtest18 => sbtest.sbtest18 ."
+time="2025-06-06T11:39:39-07:00" level=info msg="Table map: sbtest.sbtest19 => sbtest.sbtest19 ."
+time="2025-06-06T11:39:39-07:00" level=info msg="Table map: sbtest.sbtest2 => sbtest.sbtest2 ."
+time="2025-06-06T11:39:39-07:00" level=info msg="Table map: sbtest.sbtest20 => sbtest.sbtest20 ."
+time="2025-06-06T11:39:39-07:00" level=info msg="Table map: sbtest.sbtest21 => sbtest.sbtest21 ."
+time="2025-06-06T11:39:39-07:00" level=info msg="Table map: sbtest.sbtest22 => sbtest.sbtest22 ."
+time="2025-06-06T11:39:39-07:00" level=info msg="Table map: sbtest.sbtest23 => sbtest.sbtest23 ."
+time="2025-06-06T11:39:39-07:00" level=info msg="Table map: sbtest.sbtest24 => sbtest.sbtest24 ."
+time="2025-06-06T11:39:39-07:00" level=info msg="Table map: sbtest.sbtest3 => sbtest.sbtest3 ."
+time="2025-06-06T11:39:39-07:00" level=info msg="Table map: sbtest.sbtest4 => sbtest.sbtest4 ."
+time="2025-06-06T11:39:39-07:00" level=info msg="Table map: sbtest.sbtest5 => sbtest.sbtest5 ."
+time="2025-06-06T11:39:39-07:00" level=info msg="Table map: sbtest.sbtest6 => sbtest.sbtest6 ."
+time="2025-06-06T11:39:39-07:00" level=info msg="Table map: sbtest.sbtest7 => sbtest.sbtest7 ."
+time="2025-06-06T11:39:39-07:00" level=info msg="Table map: sbtest.sbtest8 => sbtest.sbtest8 ."
+time="2025-06-06T11:39:39-07:00" level=info msg="Table map: sbtest.sbtest9 => sbtest.sbtest9 ."
+time="2025-06-06T11:39:39-07:00" level=info msg="Starting check table pair: sbtest.sbtest1 => sbtest.sbtest1 ."
+time="2025-06-06T11:39:40-07:00" level=info msg="Info: record CRC32 checksum value is equal of table pair: sbtest.sbtest1 => sbtest.sbtest1 , tableCheckDuration=558.509111ms, tableCheckSpeed= 100000 rows/second."
+time="2025-06-06T11:39:40-07:00" level=info msg="End check table pair: sbtest.sbtest1 => sbtest.sbtest1 ."
+time="2025-06-06T11:39:40-07:00" level=info msg="Starting check table pair: sbtest.sbtest10 => sbtest.sbtest10 ."
+time="2025-06-06T11:39:41-07:00" level=info msg="Info: record CRC32 checksum value is equal of table pair: sbtest.sbtest10 => sbtest.sbtest10 , tableCheckDuration=1.072464832s, tableCheckSpeed= 100000 rows/second."
+time="2025-06-06T11:39:41-07:00" level=info msg="End check table pair: sbtest.sbtest10 => sbtest.sbtest10 ."
+time="2025-06-06T11:39:41-07:00" level=info msg="Starting check table pair: sbtest.sbtest11 => sbtest.sbtest11 ."
+time="2025-06-06T11:39:41-07:00" level=info msg="Info: record CRC32 checksum value is equal of table pair: sbtest.sbtest11 => sbtest.sbtest11 , tableCheckDuration=257.890423ms, tableCheckSpeed= 100000 rows/second."
+time="2025-06-06T11:39:41-07:00" level=info msg="End check table pair: sbtest.sbtest11 => sbtest.sbtest11 ."
+time="2025-06-06T11:39:41-07:00" level=info msg="Starting check table pair: sbtest.sbtest12 => sbtest.sbtest12 ."
+time="2025-06-06T11:39:41-07:00" level=info msg="Info: record CRC32 checksum value is equal of table pair: sbtest.sbtest12 => sbtest.sbtest12 , tableCheckDuration=253.987565ms, tableCheckSpeed= 100000 rows/second."
+time="2025-06-06T11:39:41-07:00" level=info msg="End check table pair: sbtest.sbtest12 => sbtest.sbtest12 ."
+time="2025-06-06T11:39:41-07:00" level=info msg="Starting check table pair: sbtest.sbtest13 => sbtest.sbtest13 ."
+time="2025-06-06T11:39:41-07:00" level=info msg="Info: record CRC32 checksum value is equal of table pair: sbtest.sbtest13 => sbtest.sbtest13 , tableCheckDuration=249.332772ms, tableCheckSpeed= 100000 rows/second."
+time="2025-06-06T11:39:41-07:00" level=info msg="End check table pair: sbtest.sbtest13 => sbtest.sbtest13 ."
+time="2025-06-06T11:39:41-07:00" level=info msg="Starting check table pair: sbtest.sbtest14 => sbtest.sbtest14 ."
+time="2025-06-06T11:39:42-07:00" level=info msg="Info: record CRC32 checksum value is equal of table pair: sbtest.sbtest14 => sbtest.sbtest14 , tableCheckDuration=275.567289ms, tableCheckSpeed= 100000 rows/second."
+time="2025-06-06T11:39:42-07:00" level=info msg="End check table pair: sbtest.sbtest14 => sbtest.sbtest14 ."
+time="2025-06-06T11:39:42-07:00" level=info msg="Starting check table pair: sbtest.sbtest15 => sbtest.sbtest15 ."
+time="2025-06-06T11:39:42-07:00" level=info msg="Info: record CRC32 checksum value is equal of table pair: sbtest.sbtest15 => sbtest.sbtest15 , tableCheckDuration=259.829183ms, tableCheckSpeed= 100000 rows/second."
+time="2025-06-06T11:39:42-07:00" level=info msg="End check table pair: sbtest.sbtest15 => sbtest.sbtest15 ."
+time="2025-06-06T11:39:42-07:00" level=info msg="Starting check table pair: sbtest.sbtest16 => sbtest.sbtest16 ."
+time="2025-06-06T11:39:42-07:00" level=info msg="Info: record CRC32 checksum value is equal of table pair: sbtest.sbtest16 => sbtest.sbtest16 , tableCheckDuration=251.448752ms, tableCheckSpeed= 100000 rows/second."
+time="2025-06-06T11:39:42-07:00" level=info msg="End check table pair: sbtest.sbtest16 => sbtest.sbtest16 ."
+time="2025-06-06T11:39:42-07:00" level=info msg="Starting check table pair: sbtest.sbtest17 => sbtest.sbtest17 ."
+time="2025-06-06T11:39:42-07:00" level=info msg="Info: record CRC32 checksum value is equal of table pair: sbtest.sbtest17 => sbtest.sbtest17 , tableCheckDuration=252.834589ms, tableCheckSpeed= 100000 rows/second."
+time="2025-06-06T11:39:42-07:00" level=info msg="End check table pair: sbtest.sbtest17 => sbtest.sbtest17 ."
+time="2025-06-06T11:39:42-07:00" level=info msg="Starting check table pair: sbtest.sbtest18 => sbtest.sbtest18 ."
+time="2025-06-06T11:39:43-07:00" level=info msg="Info: record CRC32 checksum value is equal of table pair: sbtest.sbtest18 => sbtest.sbtest18 , tableCheckDuration=254.886938ms, tableCheckSpeed= 100000 rows/second."
+time="2025-06-06T11:39:43-07:00" level=info msg="End check table pair: sbtest.sbtest18 => sbtest.sbtest18 ."
+time="2025-06-06T11:39:43-07:00" level=info msg="Starting check table pair: sbtest.sbtest19 => sbtest.sbtest19 ."
+time="2025-06-06T11:39:43-07:00" level=info msg="Info: record CRC32 checksum value is equal of table pair: sbtest.sbtest19 => sbtest.sbtest19 , tableCheckDuration=255.367792ms, tableCheckSpeed= 100000 rows/second."
+time="2025-06-06T11:39:43-07:00" level=info msg="End check table pair: sbtest.sbtest19 => sbtest.sbtest19 ."
+time="2025-06-06T11:39:43-07:00" level=info msg="Starting check table pair: sbtest.sbtest2 => sbtest.sbtest2 ."
+time="2025-06-06T11:39:43-07:00" level=info msg="Info: record CRC32 checksum value is equal of table pair: sbtest.sbtest2 => sbtest.sbtest2 , tableCheckDuration=254.412822ms, tableCheckSpeed= 100000 rows/second."
+time="2025-06-06T11:39:43-07:00" level=info msg="End check table pair: sbtest.sbtest2 => sbtest.sbtest2 ."
+time="2025-06-06T11:39:43-07:00" level=info msg="Starting check table pair: sbtest.sbtest20 => sbtest.sbtest20 ."
+time="2025-06-06T11:39:43-07:00" level=info msg="Info: record CRC32 checksum value is equal of table pair: sbtest.sbtest20 => sbtest.sbtest20 , tableCheckDuration=251.905263ms, tableCheckSpeed= 100000 rows/second."
+time="2025-06-06T11:39:43-07:00" level=info msg="End check table pair: sbtest.sbtest20 => sbtest.sbtest20 ."
+time="2025-06-06T11:39:43-07:00" level=info msg="Starting check table pair: sbtest.sbtest21 => sbtest.sbtest21 ."
+time="2025-06-06T11:39:44-07:00" level=info msg="Info: record CRC32 checksum value is equal of table pair: sbtest.sbtest21 => sbtest.sbtest21 , tableCheckDuration=294.660871ms, tableCheckSpeed= 100000 rows/second."
+time="2025-06-06T11:39:44-07:00" level=info msg="End check table pair: sbtest.sbtest21 => sbtest.sbtest21 ."
+time="2025-06-06T11:39:44-07:00" level=info msg="Starting check table pair: sbtest.sbtest22 => sbtest.sbtest22 ."
+time="2025-06-06T11:39:44-07:00" level=info msg="Info: record CRC32 checksum value is equal of table pair: sbtest.sbtest22 => sbtest.sbtest22 , tableCheckDuration=254.852414ms, tableCheckSpeed= 100000 rows/second."
+time="2025-06-06T11:39:44-07:00" level=info msg="End check table pair: sbtest.sbtest22 => sbtest.sbtest22 ."
+time="2025-06-06T11:39:44-07:00" level=info msg="Starting check table pair: sbtest.sbtest23 => sbtest.sbtest23 ."
+time="2025-06-06T11:39:44-07:00" level=info msg="Info: record CRC32 checksum value is equal of table pair: sbtest.sbtest23 => sbtest.sbtest23 , tableCheckDuration=255.28893ms, tableCheckSpeed= 100000 rows/second."
+time="2025-06-06T11:39:44-07:00" level=info msg="End check table pair: sbtest.sbtest23 => sbtest.sbtest23 ."
+time="2025-06-06T11:39:44-07:00" level=info msg="Starting check table pair: sbtest.sbtest24 => sbtest.sbtest24 ."
+time="2025-06-06T11:39:44-07:00" level=info msg="Info: record CRC32 checksum value is equal of table pair: sbtest.sbtest24 => sbtest.sbtest24 , tableCheckDuration=250.826814ms, tableCheckSpeed= 100000 rows/second."
+time="2025-06-06T11:39:44-07:00" level=info msg="End check table pair: sbtest.sbtest24 => sbtest.sbtest24 ."
+time="2025-06-06T11:39:44-07:00" level=info msg="Starting check table pair: sbtest.sbtest3 => sbtest.sbtest3 ."
+time="2025-06-06T11:39:47-07:00" level=error msg="Critical: record CRC32 checksum value is not equal of table pair: sbtest.sbtest3 => sbtest.sbtest3 , tableCheckDuration=2.133377276s"
+time="2025-06-06T11:39:47-07:00" level=info msg="Running differential analysis for table pair: sbtest.sbtest3 => sbtest.sbtest3"
+time="2025-06-06T11:39:47-07:00" level=info msg="Starting differential analysis for table pair: sbtest.sbtest3 => sbtest.sbtest3"
+time="2025-06-06T11:39:47-07:00" level=info msg="=== DIFFERENTIAL ANALYSIS RESULTS ==="
+time="2025-06-06T11:39:47-07:00" level=info msg="Table Pair: sbtest.sbtest3 => sbtest.sbtest3"
+time="2025-06-06T11:39:47-07:00" level=error msg="- 5 records exist only in SOURCE"
+time="2025-06-06T11:39:47-07:00" level=info msg="= 50045 records are identical"
+time="2025-06-06T11:39:47-07:00" level=info msg="=== SAMPLE DIFFERENCES ==="
+time="2025-06-06T11:39:47-07:00" level=error msg="- Record (id=[53 48 48 48 51]) exists only in source"
+time="2025-06-06T11:39:47-07:00" level=error msg="- Record (id=[53 48 48 48 48]) exists only in source"
+time="2025-06-06T11:39:47-07:00" level=error msg="- Record (id=[53 48 48 48 49]) exists only in source"
+time="2025-06-06T11:39:47-07:00" level=error msg="- Record (id=[53 48 48 48 50]) exists only in source"
+time="2025-06-06T11:39:47-07:00" level=error msg="- Record (id=[53 48 48 48 52]) exists only in source"
+time="2025-06-06T11:39:47-07:00" level=info msg="=== END DIFFERENTIAL ANALYSIS ==="
+time="2025-06-06T11:39:47-07:00" level=info msg="Starting check table pair: sbtest.sbtest4 => sbtest.sbtest4 ."
+time="2025-06-06T11:39:47-07:00" level=info msg="Info: record CRC32 checksum value is equal of table pair: sbtest.sbtest4 => sbtest.sbtest4 , tableCheckDuration=256.227545ms, tableCheckSpeed= 100000 rows/second."
+time="2025-06-06T11:39:47-07:00" level=info msg="End check table pair: sbtest.sbtest4 => sbtest.sbtest4 ."
+time="2025-06-06T11:39:47-07:00" level=info msg="Starting check table pair: sbtest.sbtest5 => sbtest.sbtest5 ."
+time="2025-06-06T11:39:47-07:00" level=info msg="Info: record CRC32 checksum value is equal of table pair: sbtest.sbtest5 => sbtest.sbtest5 , tableCheckDuration=254.200657ms, tableCheckSpeed= 100000 rows/second."
+time="2025-06-06T11:39:47-07:00" level=info msg="End check table pair: sbtest.sbtest5 => sbtest.sbtest5 ."
+time="2025-06-06T11:39:47-07:00" level=info msg="Starting check table pair: sbtest.sbtest6 => sbtest.sbtest6 ."
+time="2025-06-06T11:39:48-07:00" level=info msg="Info: record CRC32 checksum value is equal of table pair: sbtest.sbtest6 => sbtest.sbtest6 , tableCheckDuration=263.125136ms, tableCheckSpeed= 100000 rows/second."
+time="2025-06-06T11:39:48-07:00" level=info msg="End check table pair: sbtest.sbtest6 => sbtest.sbtest6 ."
+time="2025-06-06T11:39:48-07:00" level=info msg="Starting check table pair: sbtest.sbtest7 => sbtest.sbtest7 ."
+time="2025-06-06T11:39:48-07:00" level=info msg="Info: record CRC32 checksum value is equal of table pair: sbtest.sbtest7 => sbtest.sbtest7 , tableCheckDuration=248.430711ms, tableCheckSpeed= 100000 rows/second."
+time="2025-06-06T11:39:48-07:00" level=info msg="End check table pair: sbtest.sbtest7 => sbtest.sbtest7 ."
+time="2025-06-06T11:39:48-07:00" level=info msg="Starting check table pair: sbtest.sbtest8 => sbtest.sbtest8 ."
+time="2025-06-06T11:39:48-07:00" level=info msg="Info: record CRC32 checksum value is equal of table pair: sbtest.sbtest8 => sbtest.sbtest8 , tableCheckDuration=251.678157ms, tableCheckSpeed= 100000 rows/second."
+time="2025-06-06T11:39:48-07:00" level=info msg="End check table pair: sbtest.sbtest8 => sbtest.sbtest8 ."
+time="2025-06-06T11:39:48-07:00" level=info msg="Starting check table pair: sbtest.sbtest9 => sbtest.sbtest9 ."
+time="2025-06-06T11:39:49-07:00" level=info msg="Info: record CRC32 checksum value is equal of table pair: sbtest.sbtest9 => sbtest.sbtest9 , tableCheckDuration=253.057682ms, tableCheckSpeed= 100000 rows/second."
+time="2025-06-06T11:39:49-07:00" level=info msg="End check table pair: sbtest.sbtest9 => sbtest.sbtest9 ."
+time="2025-06-06T11:39:49-07:00" level=error msg="Table records check result 23 equal, 1 not equal."
+time="2025-06-06T11:39:49-07:00" level=info msg="Finished go-data-checksum. TotalDuration=9.566251379s"
+```
+
 ## DETAILED FUNCTIONALITY EXPLANATION
 
 ### Core Verification Technology
