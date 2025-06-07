@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/ChaosHour/go-data-checksum/pkg/builder"
+	"github.com/ChaosHour/go-data-checksum/pkg/tracking"
 	"github.com/ChaosHour/go-data-checksum/pkg/types"
 )
 
@@ -40,14 +41,31 @@ type ChecksumContext struct {
 	PerTableContext                 *types.TableContext
 	SourceResultQueue               chan *crc32ResultStruct
 	TargetResultQueue               chan *crc32ResultStruct
+
+	// Add tracking fields
+	JobTracker   *tracking.JobTracker
+	ComparisonID int64
+	ChunkTracker map[int]*ChunkProgress
 }
 
+type ChunkProgress struct {
+	ChunkNumber    int
+	StartTime      time.Time
+	EndTime        time.Time
+	SourceChecksum string
+	TargetChecksum string
+	IsEqual        bool
+	ErrorMessage   string
+}
+
+// NewChecksumContext(context *types.BaseContext, perTableContext *types.TableContext) *ChecksumContext {
 func NewChecksumContext(context *types.BaseContext, perTableContext *types.TableContext) *ChecksumContext {
 	return &ChecksumContext{
 		Context:           context,
 		PerTableContext:   perTableContext,
 		SourceResultQueue: make(chan *crc32ResultStruct),
 		TargetResultQueue: make(chan *crc32ResultStruct),
+		ChunkTracker:      make(map[int]*ChunkProgress),
 	}
 }
 
@@ -101,12 +119,9 @@ func (ctx *ChecksumContext) GetCheckColumns() (err error) {
 		}
 		ctx.Context.Log.Debugf("Debug: table %s.%s CheckColumns are %s\n", ctx.PerTableContext.SourceDatabaseName, ctx.PerTableContext.SourceTableName, columnNames)
 		ctx.CheckColumns = types.ParseColumnList(columnNames)
-		if err := trx.Commit(); err != nil {
-			return err
-		}
-		return nil
+		return trx.Commit()
 	}()
-	return nil
+	return err
 }
 
 // GetUniqueKeys investigates a table and returns the list of unique keys
@@ -322,7 +337,7 @@ func (ctx *ChecksumContext) IterationQueryChecksum() (isChunkChecksumEqual bool,
 					break
 				}
 			}
-			if founded == false {
+			if !founded {
 				return false
 			}
 		}
@@ -353,7 +368,7 @@ func (ctx *ChecksumContext) IterationQueryChecksum() (isChunkChecksumEqual bool,
 	if reflect.DeepEqual(sourceResult, targetResult) {
 		return true, duration, nil
 	} else if checkLevel == 2 {
-		if isSuperset := subsetCheckFunc(sourceResult, targetResult); isSuperset == false {
+		if isSuperset := subsetCheckFunc(sourceResult, targetResult); !isSuperset {
 			return false, duration, nil
 		}
 		return true, duration, nil
@@ -393,13 +408,11 @@ func (ctx *ChecksumContext) QueryChecksumFunc(db *gosql.DB, databaseName, tableN
 		}
 		ret = append(ret, rowValues.StringColumn(0))
 	}
-	err = rows.Err()
-	if err != nil {
+	if err = rows.Err(); err != nil {
 		ch <- newCrc32ResultStruct(ret, err)
 		return
 	}
-	ch <- newCrc32ResultStruct(ret, err)
-	return
+	ch <- newCrc32ResultStruct(ret, nil)
 }
 
 // DataChecksumByCount 比较源表和目标表的总记录数，如果IsSuperSetAsEqual为false则只有记录数相等才认为核平，否则源表记录数少于等于目标表则认为核平，返回是否核平以及是否需要继续核对
