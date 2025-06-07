@@ -110,11 +110,11 @@ make build
 ```bash
 # Compare all tables in a specific database with detailed difference reporting
 ./bin/go-data-checksum \
-  --source-db-host=dev-sandbox-mysql-qa-usa.dms.gannettdigital.com \
+  --source-db-host=dev-sandbox.com \
   --source-db-port=3306 \
   --source-db-user=flyway \
   --source-db-password="xxxx" \
-  --target-db-host=dev-sandbox-mysql-qa-usa2.dms.gannettdigital.com \
+  --target-db-host=dev-sandbox.com \
   --target-db-port=3306 \
   --target-db-user=flyway \
   --target-db-password="xxxx" \
