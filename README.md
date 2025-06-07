@@ -266,6 +266,22 @@ mysql --defaults-group-suffix=_replica1 -e "SELECT id FROM sbtest.sbtest3 WHERE 
 
 ## Result
 ```bash
+./bin/go-data-checksum \
+  --source-db-host="192.168.50.75" \
+  --source-db-port=3306 \
+  --source-db-user="root" \
+  --source-db-password="s3cr3t" \
+  --target-db-host="192.168.50.75" \
+  --target-db-port=3307 \
+  --target-db-user="root" \
+  --target-db-password="s3cr3t" \
+  --source-db-name="sbtest" \
+  --default-retries=3 \
+  --enable-differential-reporting \
+  --ignore-row-count-check \
+  --logfile="comparison.log"
+
+  
 time="2025-06-06T11:39:39-07:00" level=info msg="Staring go-data-checksum dev..."
 time="2025-06-06T11:39:39-07:00" level=info msg="24 pairs of source and target tables:"
 time="2025-06-06T11:39:39-07:00" level=info msg="Table map: sbtest.sbtest1 => sbtest.sbtest1 ."
