@@ -13,8 +13,6 @@ import (
 	"sync"
 	"time"
 
-	// Add this import
-
 	"github.com/ChaosHour/go-data-checksum/pkg/checksum"
 	"github.com/ChaosHour/go-data-checksum/pkg/types"
 )
@@ -249,6 +247,16 @@ func (job *ChecksumJob) ChecksumPerTable(baseContext *types.BaseContext, tableCo
 				tableCheckDuration = time.Since(startTime)
 				baseContext.Log.Debugf("Debug: Iteration %d, record CRC32 checksum value is not equal of table pair: %s.%s => %s.%s , Duration=%+v", int(ChecksumContext.GetIteration()), ChecksumContext.PerTableContext.SourceDatabaseName, ChecksumContext.PerTableContext.SourceTableName, ChecksumContext.PerTableContext.TargetDatabaseName, ChecksumContext.PerTableContext.TargetTableName, duration)
 				baseContext.Log.Errorf("Critical: record CRC32 checksum value is not equal of table pair: %s.%s => %s.%s , tableCheckDuration=%+v", ChecksumContext.PerTableContext.SourceDatabaseName, ChecksumContext.PerTableContext.SourceTableName, ChecksumContext.PerTableContext.TargetDatabaseName, ChecksumContext.PerTableContext.TargetTableName, tableCheckDuration)
+
+				// If differential reporting is enabled and we found differences, run detailed analysis
+				if baseContext.EnableDifferentialReporting {
+					baseContext.Log.Infof("Running differential analysis for table pair: %s.%s => %s.%s", ChecksumContext.PerTableContext.SourceDatabaseName, ChecksumContext.PerTableContext.SourceTableName, ChecksumContext.PerTableContext.TargetDatabaseName, ChecksumContext.PerTableContext.TargetTableName)
+					differ := &checksum.TableDiffer{Context: ChecksumContext}
+					if diffErr := differ.AnalyzeAndReportDifferences(); diffErr != nil {
+						baseContext.Log.Errorf("Failed to perform differential analysis: %v", diffErr)
+					}
+				}
+
 				return nil
 			}
 			baseContext.Log.Debugf("Debug: Iteration %d, record CRC32 checksum value is equal of table pair: %s.%s => %s.%s , Duration=%+v", int(ChecksumContext.GetIteration()), ChecksumContext.PerTableContext.SourceDatabaseName, ChecksumContext.PerTableContext.SourceTableName, ChecksumContext.PerTableContext.TargetDatabaseName, ChecksumContext.PerTableContext.TargetTableName, duration)
@@ -344,6 +352,16 @@ func (job *ChecksumJob) ChecksumPerTableViaTimeColumn(baseContext *types.BaseCon
 				tableCheckDuration = time.Since(startTime)
 				baseContext.Log.Debugf("Debug: Iteration %d, record CRC32 checksum value is not equal of table pair: %s.%s => %s.%s , Duration=%+v", int(ChecksumContext.GetIteration()), ChecksumContext.PerTableContext.SourceDatabaseName, ChecksumContext.PerTableContext.SourceTableName, ChecksumContext.PerTableContext.TargetDatabaseName, ChecksumContext.PerTableContext.TargetTableName, duration)
 				baseContext.Log.Errorf("Critical: record CRC32 checksum value is not equal of table pair: %s.%s => %s.%s , tableCheckDuration=%+v", ChecksumContext.PerTableContext.SourceDatabaseName, ChecksumContext.PerTableContext.SourceTableName, ChecksumContext.PerTableContext.TargetDatabaseName, ChecksumContext.PerTableContext.TargetTableName, tableCheckDuration)
+
+				// If differential reporting is enabled and we found differences, run detailed analysis
+				if baseContext.EnableDifferentialReporting {
+					baseContext.Log.Infof("Running differential analysis for table pair: %s.%s => %s.%s", ChecksumContext.PerTableContext.SourceDatabaseName, ChecksumContext.PerTableContext.SourceTableName, ChecksumContext.PerTableContext.TargetDatabaseName, ChecksumContext.PerTableContext.TargetTableName)
+					differ := &checksum.TableDiffer{Context: ChecksumContext}
+					if diffErr := differ.AnalyzeAndReportDifferences(); diffErr != nil {
+						baseContext.Log.Errorf("Failed to perform differential analysis: %v", diffErr)
+					}
+				}
+
 				return nil
 			}
 			baseContext.Log.Debugf("Debug: Iteration %d, record CRC32 checksum value is equal of table pair: %s.%s => %s.%s , Duration=%+v", int(ChecksumContext.GetIteration()), ChecksumContext.PerTableContext.SourceDatabaseName, ChecksumContext.PerTableContext.SourceTableName, ChecksumContext.PerTableContext.TargetDatabaseName, ChecksumContext.PerTableContext.TargetTableName, duration)
@@ -450,6 +468,7 @@ func main() {
 	specifiedDatetimeRangeEnd := flag.String("specified-time-end", "", "Specified end time of time column to check.")
 	chunkSize := flag.Int64("chunk-size", 1000, "amount of rows to handle in each iteration (allowed range: 10-100,000)")
 	defaultRetries := flag.Int64("default-retries", 5, "Default number of retries for various operations before panicking")
+	flag.BoolVar(&baseContext.EnableDifferentialReporting, "enable-differential-reporting", false, "Enable detailed differential reporting showing which records differ by primary key")
 	flag.BoolVar(&baseContext.IsSuperSetAsEqual, "is-superset-as-equal", false, "Shall we think that the records in target table is the superset of the source as equal? By default, we think the records are exactly equal as equal.")
 	flag.BoolVar(&baseContext.IgnoreRowCountCheck, "ignore-row-count-check", false, "Shall we ignore check by counting rows? Default: false")
 	flag.IntVar(&baseContext.ParallelThreads, "threads", 1, "Parallel threads of table checksum.")
