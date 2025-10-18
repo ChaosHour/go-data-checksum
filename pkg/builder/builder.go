@@ -31,7 +31,7 @@ func EscapeName(name string) string {
 
 // buildColumnsPreparedValues 构造columns的prepared values，做一些时区转换和json转换等
 func buildColumnsPreparedValues(columns *types.ColumnList) []string {
-	values := make([]string, columns.Len(), columns.Len())
+	values := make([]string, columns.Len())
 	for i, column := range columns.Columns() {
 		var token string
 		if column.EnumToTextConversion {
@@ -48,7 +48,7 @@ func buildColumnsPreparedValues(columns *types.ColumnList) []string {
 
 // buildPreparedValues 构造prepared values
 func buildPreparedValues(length int) []string {
-	values := make([]string, length, length)
+	values := make([]string, length)
 	for i := 0; i < length; i++ {
 		values[i] = "?"
 	}
@@ -57,7 +57,7 @@ func buildPreparedValues(length int) []string {
 
 // 复制slice的值
 func duplicateNames(names []string) []string {
-	duplicate := make([]string, len(names), len(names))
+	duplicate := make([]string, len(names))
 	// copy() 可以将一个数组切片复制到另一个数组切片中 copy(destSlice, srcSlice []T) int
 	copy(duplicate, names)
 	return duplicate
@@ -66,10 +66,10 @@ func duplicateNames(names []string) []string {
 // BuildValueComparison 构造比较表达式，譬如 "(column = ?) 或者 (column > ?)"
 func BuildValueComparison(column string, value string, comparisonSign ValueComparisonSign) (result string, err error) {
 	if column == "" {
-		return "", fmt.Errorf("Empty column in GetValueComparison")
+		return "", fmt.Errorf("empty column in GetValueComparison")
 	}
 	if value == "" {
-		return "", fmt.Errorf("Empty value in GetValueComparison")
+		return "", fmt.Errorf("empty value in GetValueComparison")
 	}
 	comparison := fmt.Sprintf("(%s %s %s)", EscapeName(column), string(comparisonSign), value)
 	return comparison, err
@@ -78,10 +78,10 @@ func BuildValueComparison(column string, value string, comparisonSign ValueCompa
 // BuildEqualsComparison 返回所有columns的条件表达式，譬如((col1 = ?) and (col2 = ?) and (col3 = ?))
 func BuildEqualsComparison(columns []string, values []string) (result string, err error) {
 	if len(columns) == 0 {
-		return "", fmt.Errorf("Got 0 columns in GetEqualsComparison")
+		return "", fmt.Errorf("got 0 columns in GetEqualsComparison")
 	}
 	if len(columns) != len(values) {
-		return "", fmt.Errorf("Got %d columns but %d values in GetEqualsComparison", len(columns), len(values))
+		return "", fmt.Errorf("got %d columns but %d values in GetEqualsComparison", len(columns), len(values))
 	}
 	comparisons := []string{}
 	for i, column := range columns {
@@ -111,7 +111,7 @@ func BuildEqualsPreparedComparison(columns []string) (result string, err error) 
 // BuildSetPreparedClause 构造update语句的set子句，譬如 col1=?, col2=?
 func BuildSetPreparedClause(columns *types.ColumnList) (result string, err error) {
 	if columns.Len() == 0 {
-		return "", fmt.Errorf("Got 0 columns in BuildSetPreparedClause")
+		return "", fmt.Errorf("got 0 columns in BuildSetPreparedClause")
 	}
 	setTokens := []string{}
 	for _, column := range columns.Columns() {
@@ -136,13 +136,13 @@ func BuildSetPreparedClause(columns *types.ColumnList) (result string, err error
 // 返回结果类似"explodedArgs = [v1, v1, v2, v1, v2, v3, v1, v2, v3]"
 func BuildRangeComparison(columns []string, values []string, args []interface{}, comparisonSign ValueComparisonSign) (result string, explodedArgs []interface{}, err error) {
 	if len(columns) == 0 {
-		return "", explodedArgs, fmt.Errorf("Got 0 columns in GetRangeComparison")
+		return "", explodedArgs, fmt.Errorf("got 0 columns in GetRangeComparison")
 	}
 	if len(columns) != len(values) {
-		return "", explodedArgs, fmt.Errorf("Got %d columns but %d values in GetEqualsComparison", len(columns), len(values))
+		return "", explodedArgs, fmt.Errorf("got %d columns but %d values in GetEqualsComparison", len(columns), len(values))
 	}
 	if len(columns) != len(args) {
-		return "", explodedArgs, fmt.Errorf("Got %d columns but %d args in GetEqualsComparison", len(columns), len(args))
+		return "", explodedArgs, fmt.Errorf("got %d columns but %d args in GetEqualsComparison", len(columns), len(args))
 	}
 	includeEquals := false
 	if comparisonSign == LessThanOrEqualsComparisonSign {
@@ -251,20 +251,21 @@ func BuildChunkChecksumSQL(databaseName, tableName string, checkColumns, uniqueK
 	explodedArgs = append(explodedArgs, rangeExplodedArgs...)
 
 	var checkClause string
-	if checkLevel == 1 {
+	switch checkLevel {
+	case 1:
 		checkClause = fmt.Sprintf("COALESCE(LOWER(CONV(BIT_XOR(cast(crc32(CONCAT_WS('#', %s)) as UNSIGNED)), 10, 16)), 0) as CRC32XOR",
 			checkColumnNamesListing)
-	} else if checkLevel == 2 {
+	case 2:
 		checkClause = fmt.Sprintf("COALESCE(LOWER(CONV(cast(crc32(CONCAT_WS('#', %s)) as UNSIGNED), 10, 16)), 0) as CRC32",
 			checkColumnNamesListing)
-	} else {
-		return "", nil, fmt.Errorf("Critical: table %s.%s wrong checkLevelFlag input in BuildChunkChecksumSQL.",
+	default:
+		return "", nil, fmt.Errorf("critical: table %s.%s wrong checkLevelFlag input in BuildChunkChecksumSQL",
 			databaseName, tableName)
 	}
 
 	// uniqueKeyColumnNames 为唯一键的字段名，uniqueKeyColumnAscending 为唯一键字段名+asc
 	uniqueKeyColumnNames := duplicateNames(uniqueKeyColumns.Names())
-	uniqueKeyColumnAscending := make([]string, len(uniqueKeyColumnNames), len(uniqueKeyColumnNames))
+	uniqueKeyColumnAscending := make([]string, len(uniqueKeyColumnNames))
 	for i, column := range uniqueKeyColumns.Columns() {
 		uniqueKeyColumnNames[i] = EscapeName(uniqueKeyColumnNames[i])
 		if column.Type == types.EnumColumnType {
@@ -307,7 +308,7 @@ func BuildRangeChecksumPreparedQuery(databaseName, tableName string, checkColumn
 //		 offset {chunkSize -1}
 func BuildUniqueKeyRangeEndPreparedQueryViaOffset(databaseName, tableName string, uniqueKeyColumns *types.ColumnList, rangeStartArgs, rangeEndArgs []interface{}, chunkSize int64, includeRangeStartValues bool, hint string, indexName string) (result string, explodedArgs []interface{}, err error) {
 	if uniqueKeyColumns.Len() == 0 {
-		return "", explodedArgs, fmt.Errorf("Got 0 columns in BuildUniqueKeyRangeEndPreparedQuery")
+		return "", explodedArgs, fmt.Errorf("got 0 columns in BuildUniqueKeyRangeEndPreparedQuery")
 	}
 	databaseName = EscapeName(databaseName)
 	tableName = EscapeName(tableName)
@@ -335,8 +336,8 @@ func BuildUniqueKeyRangeEndPreparedQueryViaOffset(databaseName, tableName string
 
 	// uniqueKeyColumnNames 为唯一键的字段名，uniqueKeyColumnAscending 为唯一键字段名+asc，uniqueKeyColumnDescending为唯一键字段名+desc
 	uniqueKeyColumnNames := duplicateNames(uniqueKeyColumns.Names())
-	uniqueKeyColumnAscending := make([]string, len(uniqueKeyColumnNames), len(uniqueKeyColumnNames))
-	uniqueKeyColumnDescending := make([]string, len(uniqueKeyColumnNames), len(uniqueKeyColumnNames))
+	uniqueKeyColumnAscending := make([]string, len(uniqueKeyColumnNames))
+	uniqueKeyColumnDescending := make([]string, len(uniqueKeyColumnNames))
 	for i, column := range uniqueKeyColumns.Columns() {
 		uniqueKeyColumnNames[i] = EscapeName(uniqueKeyColumnNames[i])
 		if column.Type == types.EnumColumnType {
@@ -387,7 +388,7 @@ func BuildUniqueKeyRangeEndPreparedQueryViaOffset(databaseName, tableName string
 //				limit 1
 func BuildUniqueKeyRangeEndPreparedQueryViaTemptable(databaseName, tableName string, uniqueKeyColumns *types.ColumnList, rangeStartArgs, rangeEndArgs []interface{}, chunkSize int64, includeRangeStartValues bool, hint string, indexName string) (result string, explodedArgs []interface{}, err error) {
 	if uniqueKeyColumns.Len() == 0 {
-		return "", explodedArgs, fmt.Errorf("Got 0 columns in BuildUniqueKeyRangeEndPreparedQuery")
+		return "", explodedArgs, fmt.Errorf("got 0 columns in BuildUniqueKeyRangeEndPreparedQuery")
 	}
 	databaseName = EscapeName(databaseName)
 	tableName = EscapeName(tableName)
@@ -415,8 +416,8 @@ func BuildUniqueKeyRangeEndPreparedQueryViaTemptable(databaseName, tableName str
 
 	// uniqueKeyColumnNames 为唯一键的字段名，uniqueKeyColumnAscending 为唯一键字段名+asc，uniqueKeyColumnDescending为唯一键字段名+desc
 	uniqueKeyColumnNames := duplicateNames(uniqueKeyColumns.Names())
-	uniqueKeyColumnAscending := make([]string, len(uniqueKeyColumnNames), len(uniqueKeyColumnNames))
-	uniqueKeyColumnDescending := make([]string, len(uniqueKeyColumnNames), len(uniqueKeyColumnNames))
+	uniqueKeyColumnAscending := make([]string, len(uniqueKeyColumnNames))
+	uniqueKeyColumnDescending := make([]string, len(uniqueKeyColumnNames))
 	for i, column := range uniqueKeyColumns.Columns() {
 		uniqueKeyColumnNames[i] = EscapeName(uniqueKeyColumnNames[i])
 		if column.Type == types.EnumColumnType {
@@ -464,14 +465,14 @@ func BuildUniqueKeyMaxValuesPreparedQuery(databaseName, tableName string, unique
 // buildUniqueKeyMinMaxValuesPreparedQuery 生成实际构造语句，在此基础上加上asc/desc排序来构造最小/最大值的对应SQL
 func buildUniqueKeyMinMaxValuesPreparedQuery(databaseName, tableName string, uniqueKeyColumns *types.ColumnList, order string) (string, error) {
 	if uniqueKeyColumns.Len() == 0 {
-		return "", fmt.Errorf("Got 0 columns in BuildUniqueKeyMinMaxValuesPreparedQuery")
+		return "", fmt.Errorf("got 0 columns in BuildUniqueKeyMinMaxValuesPreparedQuery")
 	}
 	// 使用反引号转义库表名
 	databaseName = EscapeName(databaseName)
 	tableName = EscapeName(tableName)
 	// 拷贝uniqueKeyColumns.Names()到新的sliceuniqKeyColumnNames
 	uniqueKeyColumnNames := duplicateNames(uniqueKeyColumns.Names())
-	uniqueKeyColumnOrder := make([]string, len(uniqueKeyColumnNames), len(uniqueKeyColumnNames))
+	uniqueKeyColumnOrder := make([]string, len(uniqueKeyColumnNames))
 	for i, column := range uniqueKeyColumns.Columns() {
 		uniqueKeyColumnNames[i] = EscapeName(uniqueKeyColumnNames[i])
 		if column.Type == types.EnumColumnType {
