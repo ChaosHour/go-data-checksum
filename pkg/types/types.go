@@ -28,8 +28,6 @@ const (
 	BinaryColumnType
 )
 
-const maxMediumintUnsigned int32 = 16777215
-
 type TableContext struct {
 	SourceDatabaseName string
 	SourceTableName    string
