@@ -3,7 +3,9 @@ package checksum
 import (
 	"database/sql"
 	"fmt"
+	"os"
 	"strings"
+	"time"
 
 	"github.com/ChaosHour/go-data-checksum/pkg/builder"
 	"github.com/ChaosHour/go-data-checksum/pkg/types"
@@ -29,6 +31,7 @@ type RecordDifference struct {
 	DifferenceType   string // "source_only", "target_only", "modified"
 	SourceChecksum   string
 	TargetChecksum   string
+	FullRowData      map[string]interface{} // Full row data from source for REPLACE INTO
 }
 
 // AnalyzeAndReportDifferences performs comprehensive differential analysis
@@ -72,8 +75,9 @@ func (td *TableDiffer) AnalyzeAndReportDifferences() error {
 			report.ModifiedRecords += chunkReport.ModifiedRecords
 			report.IdenticalRecords += chunkReport.IdenticalRecords
 
-			// Keep sample differences (limit to avoid memory issues)
-			if len(report.SampleDifferences) < 100 {
+			// Keep sample differences (use configured limit to avoid memory issues)
+			maxSamples := ctx.Context.MaxSampleDifferences
+			if len(report.SampleDifferences) < maxSamples {
 				report.SampleDifferences = append(report.SampleDifferences, chunkReport.SampleDifferences...)
 			}
 
@@ -83,6 +87,15 @@ func (td *TableDiffer) AnalyzeAndReportDifferences() error {
 
 	// Report final results
 	td.reportResults(report)
+	
+	// Generate sync SQL if requested
+	if ctx.Context.GenerateSyncSQL {
+		if err := td.generateSyncSQL(report); err != nil {
+			ctx.Context.Log.Errorf("Failed to generate sync SQL: %v", err)
+			return err
+		}
+	}
+	
 	return nil
 }
 
@@ -241,7 +254,7 @@ func (td *TableDiffer) compareRecordSets(sourceRecords, targetRecords map[string
 	for pkKey, sourceRecord := range sourceRecords {
 		if targetRecord, exists := targetRecords[pkKey]; !exists {
 			report.SourceOnlyRecords++
-			if len(report.SampleDifferences) < 10 {
+			if len(report.SampleDifferences) < td.Context.Context.MaxSampleDifferences {
 				report.SampleDifferences = append(report.SampleDifferences, RecordDifference{
 					PrimaryKeyValues: sourceRecord.PrimaryKeyValues,
 					DifferenceType:   "source_only",
@@ -251,7 +264,7 @@ func (td *TableDiffer) compareRecordSets(sourceRecords, targetRecords map[string
 			}
 		} else if sourceRecord.Checksum != targetRecord.Checksum {
 			report.ModifiedRecords++
-			if len(report.SampleDifferences) < 10 {
+			if len(report.SampleDifferences) < td.Context.Context.MaxSampleDifferences {
 				report.SampleDifferences = append(report.SampleDifferences, RecordDifference{
 					PrimaryKeyValues: sourceRecord.PrimaryKeyValues,
 					DifferenceType:   "modified",
@@ -268,7 +281,7 @@ func (td *TableDiffer) compareRecordSets(sourceRecords, targetRecords map[string
 	for pkKey, targetRecord := range targetRecords {
 		if _, exists := sourceRecords[pkKey]; !exists {
 			report.TargetOnlyRecords++
-			if len(report.SampleDifferences) < 10 {
+			if len(report.SampleDifferences) < td.Context.Context.MaxSampleDifferences {
 				report.SampleDifferences = append(report.SampleDifferences, RecordDifference{
 					PrimaryKeyValues: targetRecord.PrimaryKeyValues,
 					DifferenceType:   "target_only",
@@ -307,17 +320,20 @@ func (td *TableDiffer) reportResults(report *DifferenceReport) {
 	// Show sample differences
 	if len(report.SampleDifferences) > 0 {
 		ctx.Context.Log.Infof("=== SAMPLE DIFFERENCES ===")
-		for i, diff := range report.SampleDifferences {
-			if i >= 10 { // Limit output
-				break
-			}
+		maxDisplay := ctx.Context.MaxDisplayDifferences
+		if maxDisplay > len(report.SampleDifferences) {
+			maxDisplay = len(report.SampleDifferences)
+		}
+		
+		for i := 0; i < maxDisplay; i++ {
+			diff := report.SampleDifferences[i]
 
 			pkStr := ""
 			for key, value := range diff.PrimaryKeyValues {
 				if pkStr != "" {
 					pkStr += ", "
 				}
-				pkStr += fmt.Sprintf("%s=%v", key, value)
+				pkStr += fmt.Sprintf("%s=%s", key, formatPrimaryKeyValue(value))
 			}
 
 			switch diff.DifferenceType {
@@ -330,7 +346,211 @@ func (td *TableDiffer) reportResults(report *DifferenceReport) {
 					pkStr, diff.SourceChecksum, diff.TargetChecksum)
 			}
 		}
+		
+		if len(report.SampleDifferences) > maxDisplay {
+			ctx.Context.Log.Infof("... and %d more differences (use --max-display-differences to show more)", 
+				len(report.SampleDifferences)-maxDisplay)
+		}
 	}
 
 	ctx.Context.Log.Infof("=== END DIFFERENTIAL ANALYSIS ===")
+}
+
+// formatPrimaryKeyValue converts a primary key value to a readable string
+func formatPrimaryKeyValue(value interface{}) string {
+	if value == nil {
+		return "NULL"
+	}
+	
+	switch v := value.(type) {
+	case []byte:
+		return string(v)
+	case int, int8, int16, int32, int64:
+		return fmt.Sprintf("%d", v)
+	case uint, uint8, uint16, uint32, uint64:
+		return fmt.Sprintf("%d", v)
+	case float32, float64:
+		return fmt.Sprintf("%f", v)
+	case string:
+		return v
+	default:
+		return fmt.Sprintf("%v", v)
+	}
+}
+
+// generateSyncSQL generates REPLACE INTO statements for synchronizing differences
+func (td *TableDiffer) generateSyncSQL(report *DifferenceReport) error {
+	ctx := td.Context
+	
+	if len(report.SampleDifferences) == 0 {
+		ctx.Context.Log.Infof("No differences to sync")
+		return nil
+	}
+	
+	// For each difference, fetch the full row data from source and generate REPLACE INTO
+	var output strings.Builder
+	output.WriteString(fmt.Sprintf("-- Sync SQL for %s.%s => %s.%s\n", 
+		ctx.PerTableContext.SourceDatabaseName, ctx.PerTableContext.SourceTableName,
+		ctx.PerTableContext.TargetDatabaseName, ctx.PerTableContext.TargetTableName))
+	output.WriteString(fmt.Sprintf("-- Generated at: %s\n", time.Now().Format("2006-01-02 15:04:05")))
+	output.WriteString(fmt.Sprintf("-- Total differences: source_only=%d, target_only=%d, modified=%d\n\n",
+		report.SourceOnlyRecords, report.TargetOnlyRecords, report.ModifiedRecords))
+	
+	sqlCount := 0
+	for _, diff := range report.SampleDifferences {
+		// Only generate REPLACE INTO for source_only and modified records
+		// For target_only, we would need DELETE statements (skipping for safety)
+		if diff.DifferenceType == "target_only" {
+			continue
+		}
+		
+		// Fetch full row data for this record
+		rowData, err := td.fetchFullRowData(diff.PrimaryKeyValues)
+		if err != nil {
+			ctx.Context.Log.Warnf("Failed to fetch full row data for PK %v: %v", diff.PrimaryKeyValues, err)
+			continue
+		}
+		
+		// Generate REPLACE INTO statement
+		replaceStmt := td.buildReplaceIntoStatement(rowData)
+		output.WriteString(replaceStmt)
+		output.WriteString("\n")
+		sqlCount++
+	}
+	
+	output.WriteString(fmt.Sprintf("\n-- Total REPLACE INTO statements generated: %d\n", sqlCount))
+	
+	// Write to file or stdout
+	if ctx.Context.SyncSQLFile != "" {
+		if err := td.writeSyncSQLToFile(output.String()); err != nil {
+			return err
+		}
+		ctx.Context.Log.Infof("Sync SQL written to file: %s (%d statements)", ctx.Context.SyncSQLFile, sqlCount)
+	} else {
+		fmt.Println(output.String())
+		ctx.Context.Log.Infof("Sync SQL written to stdout (%d statements)", sqlCount)
+	}
+	
+	return nil
+}
+
+// fetchFullRowData retrieves the complete row data for a given primary key
+func (td *TableDiffer) fetchFullRowData(pkValues map[string]interface{}) (map[string]interface{}, error) {
+	ctx := td.Context
+	
+	// Build WHERE clause for primary key
+	whereClause := make([]string, 0, len(pkValues))
+	args := make([]interface{}, 0, len(pkValues))
+	
+	for _, pkCol := range ctx.UniqueKey.Columns() {
+		whereClause = append(whereClause, fmt.Sprintf("%s = ?", types.EscapeName(pkCol.Name)))
+		args = append(args, pkValues[pkCol.Name])
+	}
+	
+	// Build SELECT query for all columns
+	columnNames := ctx.CheckColumns.Names()
+	escapedColumns := make([]string, len(columnNames))
+	for i, col := range columnNames {
+		escapedColumns[i] = types.EscapeName(col)
+	}
+	
+	query := fmt.Sprintf("SELECT %s FROM %s.%s WHERE %s",
+		strings.Join(escapedColumns, ", "),
+		types.EscapeName(ctx.PerTableContext.SourceDatabaseName),
+		types.EscapeName(ctx.PerTableContext.SourceTableName),
+		strings.Join(whereClause, " AND "))
+	
+	// Execute query
+	row := ctx.Context.SourceDB.QueryRow(query, args...)
+	
+	// Prepare scan destinations
+	scanDest := make([]interface{}, len(columnNames))
+	scanPtrs := make([]interface{}, len(columnNames))
+	for i := range scanDest {
+		scanPtrs[i] = &scanDest[i]
+	}
+	
+	if err := row.Scan(scanPtrs...); err != nil {
+		return nil, fmt.Errorf("failed to scan row: %v", err)
+	}
+	
+	// Build result map
+	result := make(map[string]interface{})
+	for i, colName := range columnNames {
+		result[colName] = scanDest[i]
+	}
+	
+	return result, nil
+}
+
+// buildReplaceIntoStatement generates a REPLACE INTO statement for the given row data
+func (td *TableDiffer) buildReplaceIntoStatement(rowData map[string]interface{}) string {
+	ctx := td.Context
+	
+	// Get column names in order
+	columnNames := ctx.CheckColumns.Names()
+	
+	// Build column list
+	escapedColumns := make([]string, len(columnNames))
+	for i, col := range columnNames {
+		escapedColumns[i] = types.EscapeName(col)
+	}
+	
+	// Build values list
+	values := make([]string, len(columnNames))
+	for i, col := range columnNames {
+		values[i] = td.formatValueForSQL(rowData[col])
+	}
+	
+	return fmt.Sprintf("REPLACE INTO %s.%s (%s) VALUES (%s);",
+		types.EscapeName(ctx.PerTableContext.TargetDatabaseName),
+		types.EscapeName(ctx.PerTableContext.TargetTableName),
+		strings.Join(escapedColumns, ", "),
+		strings.Join(values, ", "))
+}
+
+// formatValueForSQL formats a value for use in SQL statements
+func (td *TableDiffer) formatValueForSQL(value interface{}) string {
+	if value == nil {
+		return "NULL"
+	}
+	
+	switch v := value.(type) {
+	case []byte:
+		// Escape and quote byte slices as strings
+		return fmt.Sprintf("'%s'", strings.ReplaceAll(string(v), "'", "''"))
+	case string:
+		// Escape and quote strings
+		return fmt.Sprintf("'%s'", strings.ReplaceAll(v, "'", "''"))
+	case int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64:
+		return fmt.Sprintf("%v", v)
+	case float32, float64:
+		return fmt.Sprintf("%v", v)
+	case bool:
+		if v {
+			return "1"
+		}
+		return "0"
+	default:
+		// For other types, convert to string and quote
+		str := fmt.Sprintf("%v", v)
+		return fmt.Sprintf("'%s'", strings.ReplaceAll(str, "'", "''"))
+	}
+}
+
+// writeSyncSQLToFile writes the sync SQL to the specified file
+func (td *TableDiffer) writeSyncSQLToFile(content string) error {
+	ctx := td.Context
+	
+	file, err := os.OpenFile(ctx.Context.SyncSQLFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		return fmt.Errorf("failed to open sync SQL file: %v", err)
+	}
+	defer file.Close()
+	
+	if _, err := file.WriteString(content); err != nil {
+		return fmt.Errorf("failed to write sync SQL: %v", err)
+	}
+	
+	return nil
 }

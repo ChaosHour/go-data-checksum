@@ -34,3 +34,8 @@ vendor/
 # Build artifacts
 build/
 dist/
+
+# Local planning and notes
+PLAN.md
+
+tags
