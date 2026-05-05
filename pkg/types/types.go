@@ -86,23 +86,29 @@ type BaseContext struct {
 	SpecifiedDatetimeRangeEnd   time.Time
 	IgnoreRowCountCheck         bool
 
-	ChunkSize                   int64
-	DefaultNumRetries           int64
-	IsSuperSetAsEqual           bool
-	EnableDifferentialReporting bool
-	ParallelThreads             int
-	ChecksumResChan             chan bool
-	ChecksumErrChan             chan error
-	PanicAbort                  chan error
-	throttleMutex               *sync.Mutex
-	Log                         *log.Logger
-	Logfile                     string
+	ChunkSize                    int64
+	DefaultNumRetries            int64
+	IsSuperSetAsEqual            bool
+	EnableDifferentialReporting  bool
+	MaxSampleDifferences         int
+	MaxDisplayDifferences        int
+	GenerateSyncSQL              bool
+	SyncSQLFile                  string
+	ParallelThreads              int
+	ChecksumResChan              chan bool
+	ChecksumErrChan              chan error
+	PanicAbort                   chan error
+	throttleMutex                *sync.Mutex
+	Log                          *log.Logger
+	Logfile                      string
 }
 
 func NewBaseContext() *BaseContext {
 	return &BaseContext{
-		ChunkSize:         1000,
-		DefaultNumRetries: 10,
+		ChunkSize:             1000,
+		DefaultNumRetries:     10,
+		MaxSampleDifferences:  100,
+		MaxDisplayDifferences: 10,
 		PanicAbort:        make(chan error),
 		throttleMutex:     &sync.Mutex{},
 		Log:               log.New(),

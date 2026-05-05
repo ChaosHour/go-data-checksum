@@ -52,12 +52,18 @@ make build
         Default number of retries for various operations before panicking (default 10)
   -enable-differential-reporting
         Enable detailed differential reporting showing which records differ by primary key (default false)
+  -generate-sync-sql
+        Generate REPLACE INTO statements for synchronizing differences to a file
   -ignore-row-count-check
         Shall we ignore check by counting rows? Default: false
   -is-superset-as-equal
         Shall we think that the records in target table is the superset of the source as equal? By default, we think the records are exactly equal as equal.
   -logfile string
         Log file name.
+  -max-display-differences int
+        Maximum number of differences to display in output (default: 10) (default 10)
+  -max-sample-differences int
+        Maximum number of sample differences to collect during analysis (default: 100) (default 100)
   -source-db-host string
         Source MySQL hostname (default "127.0.0.1")
   -source-db-name string
@@ -78,6 +84,8 @@ make build
         Specified time column for range dataCheck.
   -specified-time-end string
         Specified end time of time column to check.
+  -sync-sql-file string
+        Output file for sync SQL statements (default: stdout if not specified)
   -target-database-add-suffix string
         Target database name add a suffix to the source database name.
   -target-database-as-source
@@ -144,6 +152,46 @@ make build
   --threads=1
 ```
 
+### 3. Generate Sync SQL for Data Synchronization (NEW!)
+```bash
+# Generate REPLACE INTO statements to synchronize differences
+./bin/go-data-checksum \
+  --source-db-host="source.example.com" \
+  --source-db-port=3306 \
+  --source-db-user="user" \
+  --source-db-password="pass" \
+  --target-db-host="target.example.com" \
+  --target-db-port=3306 \
+  --target-db-user="user" \
+  --target-db-password="pass" \
+  --source-db-name="app_db" \
+  --source-table-name="users" \
+  --enable-differential-reporting \
+  --generate-sync-sql \
+  --sync-sql-file="sync_users.sql" \
+  --max-sample-differences=1000 \
+  --threads=1
+
+# Apply the generated SQL to synchronize the target
+mysql -h target.example.com -u user -p target_db < sync_users.sql
+```
+
+### 4. Output Sync SQL to stdout
+```bash
+# Generate sync SQL to stdout for piping
+./bin/go-data-checksum \
+  --source-db-host="source.example.com" \
+  --source-db-user="user" \
+  --source-db-password="pass" \
+  --target-db-host="target.example.com" \
+  --target-db-user="user" \
+  --target-db-password="pass" \
+  --source-db-name="app_db" \
+  --source-table-name="users" \
+  --enable-differential-reporting \
+  --generate-sync-sql | tee sync.sql
+```
+
 ## UNDERSTANDING DIFFERENTIAL OUTPUT
 
 ### Sample Output with --enable-differential-reporting
@@ -172,6 +220,101 @@ Table Pair: dba.users => dba.users
 - **`=` (equals)**: Records that are identical in both databases
 
 **Now you can use differential reporting by adding `--enable-differential-reporting` to your existing command!**
+
+## SYNC SQL GENERATION
+
+### Overview
+The `--generate-sync-sql` feature generates `REPLACE INTO` statements for synchronizing table differences, inspired by Percona's pt-table-sync tool. This allows you to:
+
+1. Identify differences between source and target tables
+2. Generate SQL statements to fix those differences
+3. Apply the changes to bring tables into sync
+
+### How It Works
+
+**REPLACE INTO Behavior:**
+- If a row with the same unique key doesn't exist in target → **INSERT** the row
+- If a row with the same unique key exists in target → **DELETE** old row and **INSERT** new row
+- Atomic operation that handles both insert and update scenarios
+
+**What Gets Synchronized:**
+- **Source-only records** (`-`): Generated as REPLACE INTO to add missing rows
+- **Modified records** (`~`): Generated as REPLACE INTO to update changed data
+- **Target-only records** (`+`): NOT generated (safety: requires explicit DELETE)
+
+### Sample Sync SQL Output
+
+```sql
+-- Sync SQL for source_db.users => target_db.users
+-- Generated at: 2025-06-06 14:30:22
+-- Total differences: source_only=5, target_only=0, modified=2
+
+REPLACE INTO `target_db`.`users` (`id`, `name`, `email`, `created_at`) VALUES (123, 'John Doe', 'john@example.com', '2025-01-15 10:00:00');
+REPLACE INTO `target_db`.`users` (`id`, `name`, `email`, `created_at`) VALUES (456, 'Jane Smith', 'jane@example.com', '2025-02-20 15:30:00');
+REPLACE INTO `target_db`.`users` (`id`, `name`, `email`, `created_at`) VALUES (789, 'Bob Wilson', 'bob@example.com', NULL);
+
+-- Total REPLACE INTO statements generated: 3
+```
+
+### Safety Features
+
+1. **SQL Escaping**: Single quotes are properly escaped (`'` → `''`)
+2. **NULL Handling**: NULL values are written as `NULL` (not quoted)
+3. **Type Safety**: Proper quoting for strings, no quotes for numbers
+4. **Atomic Operations**: REPLACE INTO is atomic within InnoDB
+5. **Sample Limits**: Use `--max-sample-differences` to control statement count
+
+### Best Practices
+
+1. **Review Before Applying**: Always review generated SQL before execution
+2. **Test on Staging**: Test sync SQL on non-production environments first
+3. **Backup Target**: Take a backup of target database before applying changes
+4. **Handle Target-Only**: Manually review and handle target-only records
+5. **Use Transactions**: Wrap sync SQL in transactions when applying:
+   ```sql
+   START TRANSACTION;
+   source sync.sql
+   COMMIT;  -- or ROLLBACK if something looks wrong
+   ```
+
+### Workflow Example
+
+```bash
+# Step 1: Find differences and generate sync SQL
+./bin/go-data-checksum \
+  --source-db-host="prod.example.com" \
+  --source-db-user="readonly" \
+  --source-db-password="xxx" \
+  --target-db-host="replica.example.com" \
+  --target-db-user="readonly" \
+  --target-db-password="xxx" \
+  --source-db-name="production" \
+  --source-table-name="orders" \
+  --enable-differential-reporting \
+  --generate-sync-sql \
+  --sync-sql-file="sync_orders.sql" \
+  --max-sample-differences=10000
+
+# Step 2: Review the generated SQL
+less sync_orders.sql
+
+# Step 3: Apply to target (with transaction)
+mysql -h replica.example.com -u admin -p -e "
+START TRANSACTION;
+source sync_orders.sql;
+-- Review changes here
+COMMIT;
+"
+
+# Step 4: Verify sync worked
+./bin/go-data-checksum \
+  --source-db-host="prod.example.com" \
+  --target-db-host="replica.example.com" \
+  --source-db-name="production" \
+  --source-table-name="orders" \
+  --enable-differential-reporting
+```
+
 
 ## TEST
 ```bash
