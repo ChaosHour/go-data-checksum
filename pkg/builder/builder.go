@@ -294,6 +294,67 @@ func BuildRangeChecksumPreparedQuery(databaseName, tableName string, checkColumn
 	return BuildChunkChecksumSQL(databaseName, tableName, checkColumns, uniqueKeyColumns, rangeStartValues, rangeEndValues, rangeStartArgs, rangeEndArgs, includeRangeStartValues, checkLevel)
 }
 
+// BuildTimeRangeChecksumSQL 构造按时间字段分批计算CRC32的SQL。
+// 分批范围是 [rangeBegin, rangeEnd)，最后一批为 [rangeBegin, rangeEnd] (includeRangeEnd=true)。
+// checkLevel=1 返回聚合CRC32XOR(顺序无关)，checkLevel=2 返回逐行CRC32。
+func BuildTimeRangeChecksumSQL(databaseName, tableName string, checkColumns *types.ColumnList, timeColumnName string, includeRangeEnd bool, checkLevel int64) (result string, err error) {
+	if timeColumnName == "" {
+		return "", fmt.Errorf("empty time column in BuildTimeRangeChecksumSQL")
+	}
+	databaseName = EscapeName(databaseName)
+	tableName = EscapeName(tableName)
+	escapedTimeColumn := EscapeName(timeColumnName)
+
+	checkColumnNames := duplicateNames(checkColumns.Names())
+	for i := range checkColumnNames {
+		checkColumnNames[i] = EscapeName(checkColumnNames[i])
+	}
+	checkColumnNamesListing := fmt.Sprintf("hex(%s)", strings.Join(checkColumnNames, "), hex("))
+
+	var checkClause string
+	switch checkLevel {
+	case 1:
+		checkClause = fmt.Sprintf("COALESCE(LOWER(CONV(BIT_XOR(cast(crc32(CONCAT_WS('#', %s)) as UNSIGNED)), 10, 16)), 0) as CRC32XOR",
+			checkColumnNamesListing)
+	case 2:
+		checkClause = fmt.Sprintf("COALESCE(LOWER(CONV(cast(crc32(CONCAT_WS('#', %s)) as UNSIGNED), 10, 16)), 0) as CRC32",
+			checkColumnNamesListing)
+	default:
+		return "", fmt.Errorf("critical: table %s.%s wrong checkLevelFlag input in BuildTimeRangeChecksumSQL",
+			databaseName, tableName)
+	}
+
+	endComparisonSign := LessThanComparisonSign
+	if includeRangeEnd {
+		endComparisonSign = LessThanOrEqualsComparisonSign
+	}
+
+	var orderClause string
+	if checkLevel == 2 {
+		orderClause = fmt.Sprintf("order by %s asc", escapedTimeColumn)
+	}
+
+	result = fmt.Sprintf(`
+      select /* dataChecksum %s.%s */ %s
+        from %s.%s
+       where (%s >= ? and %s %s ?)
+      %s
+    `, databaseName, tableName, checkClause, databaseName, tableName,
+		escapedTimeColumn, escapedTimeColumn, string(endComparisonSign), orderClause,
+	)
+	return result, nil
+}
+
+// BuildTimeRangeEstimateQuery 构造按时间范围估算行数的EXPLAIN SQL
+func BuildTimeRangeEstimateQuery(databaseName, tableName, timeColumnName string) string {
+	return fmt.Sprintf(`
+      EXPLAIN select /* dataChecksum */ 1
+        from %s.%s
+       where (%s >= ? and %s <= ?)
+    `, EscapeName(databaseName), EscapeName(tableName),
+		EscapeName(timeColumnName), EscapeName(timeColumnName))
+}
+
 // BuildUniqueKeyRangeEndPreparedQueryViaOffset 构造分批范围的分批下限值查询SQL
 // 最终SQL类似：select  /* gh-ost db.tab iteration:5 */
 //

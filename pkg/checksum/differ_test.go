@@ -3,6 +3,7 @@ package checksum
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ChaosHour/go-data-checksum/pkg/types"
 )
@@ -18,9 +19,9 @@ func TestCompareRecordSets(t *testing.T) {
 	}
 
 	tests := []struct {
-		name           string
-		sourceRecords  map[string]RecordData
-		targetRecords  map[string]RecordData
+		name             string
+		sourceRecords    map[string]RecordData
+		targetRecords    map[string]RecordData
 		expectSourceOnly int64
 		expectTargetOnly int64
 		expectModified   int64
@@ -196,7 +197,7 @@ func TestCompareRecordSets(t *testing.T) {
 func TestCompareRecordSets_SampleLimit(t *testing.T) {
 	baseCtx := types.NewBaseContext()
 	baseCtx.MaxSampleDifferences = 10 // Set a low limit for testing
-	
+
 	td := &TableDiffer{
 		Context: &ChecksumContext{
 			Context: baseCtx,
@@ -342,31 +343,21 @@ func TestDifferenceReport_Aggregation(t *testing.T) {
 
 // TestBuildRecordQuery_ColumnEscaping tests SQL column name escaping
 func TestBuildRecordQuery_ColumnEscaping(t *testing.T) {
-	// Create a minimal context for testing
-	minValues := types.ToColumnValues([]interface{}{1})
-	maxValues := types.ToColumnValues([]interface{}{100})
-	
 	ctx := &ChecksumContext{
-		UniqueKey: types.NewColumnList([]string{"id"}),
+		UniqueKey:    types.NewColumnList([]string{"id"}),
 		CheckColumns: types.NewColumnList([]string{"name", "email"}),
-		ChecksumIterationRangeMinValues: minValues,
-		ChecksumIterationRangeMaxValues: maxValues,
 	}
 
 	td := &TableDiffer{Context: ctx}
 
-	query, args, err := td.buildRecordQuery("test_db", "test_table")
-	
+	query, err := td.buildRecordQuery("test_db", "test_table", "(`id` >= ?) AND (`id` <= ?)")
+
 	if err != nil {
 		t.Fatalf("buildRecordQuery failed: %v", err)
 	}
 
 	if query == "" {
 		t.Error("Query should not be empty")
-	}
-
-	if args == nil {
-		t.Error("Args should not be nil")
 	}
 
 	// Verify query contains escaped names
@@ -402,8 +393,8 @@ func TestBuildRecordQuery_ColumnEscaping(t *testing.T) {
 
 // Helper function
 func contains(s, substr string) bool {
-	return len(s) > 0 && len(substr) > 0 && 
-		len(s) >= len(substr) && 
+	return len(s) > 0 && len(substr) > 0 &&
+		len(s) >= len(substr) &&
 		indexOfSubstring(s, substr) >= 0
 }
 
@@ -472,9 +463,12 @@ func TestFormatValueForSQL(t *testing.T) {
 		{"float64", 3.14, "3.14"},
 		{"string", "test", "'test'"},
 		{"string with quote", "test's", "'test''s'"},
+		{"string with backslash", `C:\path\to`, `'C:\\path\\to'`},
 		{"byte slice", []byte("data"), "'data'"},
 		{"bool true", true, "1"},
 		{"bool false", false, "0"},
+		{"datetime", time.Date(2025, 1, 15, 10, 0, 0, 0, time.UTC), "'2025-01-15 10:00:00'"},
+		{"datetime with microseconds", time.Date(2025, 1, 15, 10, 0, 0, 123456000, time.UTC), "'2025-01-15 10:00:00.123456'"},
 	}
 
 	for _, tt := range tests {
@@ -491,13 +485,13 @@ func TestFormatValueForSQL(t *testing.T) {
 func TestBuildReplaceIntoStatement(t *testing.T) {
 	baseCtx := types.NewBaseContext()
 	perTableCtx := types.NewTableContext("source_db", "source_table", "target_db", "target_table")
-	
+
 	ctx := &ChecksumContext{
 		Context:         baseCtx,
 		PerTableContext: perTableCtx,
 		CheckColumns:    types.NewColumnList([]string{"id", "name", "email"}),
 	}
-	
+
 	td := &TableDiffer{Context: ctx}
 
 	rowData := map[string]interface{}{
@@ -506,7 +500,7 @@ func TestBuildReplaceIntoStatement(t *testing.T) {
 		"email": "john@example.com",
 	}
 
-	result := td.buildReplaceIntoStatement(rowData)
+	result := td.buildReplaceIntoStatement(rowData, ctx.CheckColumns)
 
 	// Verify the statement structure
 	if !strings.Contains(result, "REPLACE INTO") {
@@ -533,13 +527,13 @@ func TestBuildReplaceIntoStatement(t *testing.T) {
 func TestBuildReplaceIntoStatement_SpecialCharacters(t *testing.T) {
 	baseCtx := types.NewBaseContext()
 	perTableCtx := types.NewTableContext("source_db", "source_table", "target_db", "target_table")
-	
+
 	ctx := &ChecksumContext{
 		Context:         baseCtx,
 		PerTableContext: perTableCtx,
 		CheckColumns:    types.NewColumnList([]string{"id", "description"}),
 	}
-	
+
 	td := &TableDiffer{Context: ctx}
 
 	rowData := map[string]interface{}{
@@ -547,7 +541,7 @@ func TestBuildReplaceIntoStatement_SpecialCharacters(t *testing.T) {
 		"description": "Test's value with 'quotes'",
 	}
 
-	result := td.buildReplaceIntoStatement(rowData)
+	result := td.buildReplaceIntoStatement(rowData, ctx.CheckColumns)
 
 	// Verify SQL escaping of quotes
 	if !strings.Contains(result, "Test''s value with ''quotes''") {
@@ -559,13 +553,13 @@ func TestBuildReplaceIntoStatement_SpecialCharacters(t *testing.T) {
 func TestBuildReplaceIntoStatement_NullValues(t *testing.T) {
 	baseCtx := types.NewBaseContext()
 	perTableCtx := types.NewTableContext("source_db", "source_table", "target_db", "target_table")
-	
+
 	ctx := &ChecksumContext{
 		Context:         baseCtx,
 		PerTableContext: perTableCtx,
 		CheckColumns:    types.NewColumnList([]string{"id", "optional_field"}),
 	}
-	
+
 	td := &TableDiffer{Context: ctx}
 
 	rowData := map[string]interface{}{
@@ -573,7 +567,7 @@ func TestBuildReplaceIntoStatement_NullValues(t *testing.T) {
 		"optional_field": nil,
 	}
 
-	result := td.buildReplaceIntoStatement(rowData)
+	result := td.buildReplaceIntoStatement(rowData, ctx.CheckColumns)
 
 	// Verify NULL is used without quotes
 	if !strings.Contains(result, "1, NULL") {

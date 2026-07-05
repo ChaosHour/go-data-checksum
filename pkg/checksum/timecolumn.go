@@ -1,10 +1,12 @@
 package checksum
 
 import (
-	"database/sql"
+	gosql "database/sql"
 	"fmt"
+	"reflect"
 	"time"
 
+	"github.com/ChaosHour/go-data-checksum/pkg/builder"
 	"github.com/ChaosHour/go-data-checksum/pkg/types"
 )
 
@@ -16,102 +18,193 @@ func (ctx *ChecksumContext) GetTimeColumn() (err error) {
 			ctx.PerTableContext.SourceTableName)
 	}
 
-	// Parse the time column
-	ctx.TimeColumn = types.ParseColumnList(ctx.Context.SpecifiedDatetimeColumn)
+	// Verify the column actually exists on the source table so a typo fails
+	// loudly instead of producing an empty (and therefore "equal") check.
+	var columnName string
+	query := `
+      select COLUMN_NAME
+        from information_schema.columns
+       where table_schema = ? and table_name = ? and column_name = ?
+    `
+	if err := ctx.Context.SourceDB.QueryRow(query,
+		ctx.PerTableContext.SourceDatabaseName,
+		ctx.PerTableContext.SourceTableName,
+		ctx.Context.SpecifiedDatetimeColumn).Scan(&columnName); err != nil {
+		return fmt.Errorf("critical: time column %s not found on table %s.%s: %v",
+			ctx.Context.SpecifiedDatetimeColumn,
+			ctx.PerTableContext.SourceDatabaseName,
+			ctx.PerTableContext.SourceTableName, err)
+	}
 
+	ctx.TimeColumn = types.ParseColumnList(columnName)
 	return nil
 }
 
 // EstimateTableRowsViaExplain estimates the number of rows that match the time range criteria
 func (ctx *ChecksumContext) EstimateTableRowsViaExplain() (int, error) {
-	// Implementation that returns an estimated row count based on the table and time range
-	// Log the query we would use in a complete implementation
-	ctx.Context.Log.Debugf("Would execute EXPLAIN query for %s.%s with time column %s",
+	query := builder.BuildTimeRangeEstimateQuery(
 		ctx.PerTableContext.SourceDatabaseName,
 		ctx.PerTableContext.SourceTableName,
 		ctx.Context.SpecifiedDatetimeColumn)
 
-	// For simplicity, return a conservative estimate
-	return 1000, nil
-}
+	rows, err := ctx.Context.SourceDB.Query(query,
+		ctx.Context.SpecifiedDatetimeRangeBegin,
+		ctx.Context.SpecifiedDatetimeRangeEnd)
+	if err != nil {
+		return 0, fmt.Errorf("critical: table %s.%s estimate rows via EXPLAIN failed: %v",
+			ctx.PerTableContext.SourceDatabaseName, ctx.PerTableContext.SourceTableName, err)
+	}
+	defer rows.Close()
 
-// CalculateNextIterationTimeRange calculates the next time range to check
-func (ctx *ChecksumContext) CalculateNextIterationTimeRange() (bool, error) {
-	// If this is the first iteration, use the beginning of the time range
-	if ctx.GetIteration() == 0 {
-		ctx.TimeIterationRangeMinValue = ctx.Context.SpecifiedDatetimeRangeBegin
-		ctx.TimeIterationRangeMaxValue = ctx.Context.SpecifiedDatetimeRangeBegin.Add(ctx.Context.SpecifiedTimeRangePerStep)
-
-		// Cap at the end range
-		if ctx.TimeIterationRangeMaxValue.After(ctx.Context.SpecifiedDatetimeRangeEnd) {
-			ctx.TimeIterationRangeMaxValue = ctx.Context.SpecifiedDatetimeRangeEnd
+	columns, err := rows.Columns()
+	if err != nil {
+		return 0, err
+	}
+	rowsColumnIndex := -1
+	for i, col := range columns {
+		if col == "rows" {
+			rowsColumnIndex = i
+			break
 		}
-		return true, nil
+	}
+	if rowsColumnIndex < 0 {
+		return 0, fmt.Errorf("critical: EXPLAIN output has no 'rows' column for table %s.%s",
+			ctx.PerTableContext.SourceDatabaseName, ctx.PerTableContext.SourceTableName)
 	}
 
-	// For subsequent iterations, use the end of the previous range as the start
-	ctx.TimeIterationRangeMinValue = ctx.TimeIterationRangeMaxValue
-	ctx.TimeIterationRangeMaxValue = ctx.TimeIterationRangeMinValue.Add(ctx.Context.SpecifiedTimeRangePerStep)
+	estimatedRows := 0
+	values := types.NewColumnValues(len(columns))
+	for rows.Next() {
+		if err := rows.Scan(values.ValuesPointers...); err != nil {
+			return 0, err
+		}
+		var rowCount int
+		if _, err := fmt.Sscanf(values.StringColumn(rowsColumnIndex), "%d", &rowCount); err == nil {
+			estimatedRows += rowCount
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	ctx.Context.Log.Debugf("Debug: estimated %d rows in time range for table %s.%s",
+		estimatedRows, ctx.PerTableContext.SourceDatabaseName, ctx.PerTableContext.SourceTableName)
+	return estimatedRows, nil
+}
 
-	// Cap at the end range and check if we've reached the end
+// CalculateNextIterationTimeRange calculates the next time range to check.
+// Chunks are [min, max) except the final chunk which is [min, end].
+func (ctx *ChecksumContext) CalculateNextIterationTimeRange() (bool, error) {
+	if ctx.GetIteration() == 0 {
+		ctx.TimeIterationRangeMinValue = ctx.Context.SpecifiedDatetimeRangeBegin
+	} else {
+		// For subsequent iterations, use the end of the previous range as the start
+		ctx.TimeIterationRangeMinValue = ctx.TimeIterationRangeMaxValue
+	}
+
+	// Reached (or passed) the end of the requested range: nothing further.
+	if !ctx.TimeIterationRangeMinValue.Before(ctx.Context.SpecifiedDatetimeRangeEnd) {
+		return false, nil
+	}
+
+	ctx.TimeIterationRangeMaxValue = ctx.TimeIterationRangeMinValue.Add(ctx.Context.SpecifiedTimeRangePerStep)
 	if ctx.TimeIterationRangeMaxValue.After(ctx.Context.SpecifiedDatetimeRangeEnd) {
 		ctx.TimeIterationRangeMaxValue = ctx.Context.SpecifiedDatetimeRangeEnd
 	}
-
-	return ctx.TimeIterationRangeMinValue.Before(ctx.Context.SpecifiedDatetimeRangeEnd), nil
-}
-
-// IterationTimeRangeQueryChecksum performs a checksum query for a time range
-func (ctx *ChecksumContext) IterationTimeRangeQueryChecksum() (bool, time.Duration, error) {
-	startTime := time.Now()
-
-	// Simplified implementation that performs a checksum on records within the time range
-	// This would typically use the same approach as IterationQueryChecksum but with
-	// a time-based WHERE clause instead of a key range
-
-	// For a real implementation, you would:
-	// 1. Build a query that selects rows in the time range
-	// 2. Execute it against both source and target databases
-	// 3. Compare the checksums
-
-	return true, time.Since(startTime), nil
-}
-
-// ChecksumByTimeRange performs checksum operations on data within specified time range
-func (ctx *ChecksumContext) ChecksumByTimeRange() (bool, error) {
-	if ctx.TimeColumn == nil {
-		if err := ctx.GetTimeColumn(); err != nil {
-			return false, err
-		}
-	}
-
-	// Log the time range being checked
-	ctx.Context.Log.Debugf("Checking records in time range: %s to %s for %s.%s",
-		ctx.TimeIterationRangeMinValue.Format("2006-01-02 15:04:05"),
-		ctx.TimeIterationRangeMaxValue.Format("2006-01-02 15:04:05"),
-		ctx.PerTableContext.SourceDatabaseName,
-		ctx.PerTableContext.SourceTableName)
-
-	// Calculate a time-based query for both source and target tables
-	timeColumnName := ctx.Context.SpecifiedDatetimeColumn
-	if timeColumnName == "" {
-		return false, fmt.Errorf("no time column specified for time range checksum")
-	}
-
-	// In a real implementation, we would:
-	// 1. Build SQL for time-based data selection
-	// 2. Calculate checksums for both source and target
-	// 3. Compare the results
-
-	// For now, just return success to avoid compilation errors
 	return true, nil
 }
 
-// GetDataByTimeRange retrieves data from a specified time range
-func GetDataByTimeRange(db *sql.DB, tableName string, timeColumn string, startTime, endTime time.Time) ([]map[string]interface{}, error) {
-	// Implementation would query the database for records in the time range
-	// and return them as a structured data format
+// isFinalTimeChunk reports whether the current chunk ends exactly at the requested range end,
+// in which case the end bound is inclusive.
+func (ctx *ChecksumContext) isFinalTimeChunk() bool {
+	return ctx.TimeIterationRangeMaxValue.Equal(ctx.Context.SpecifiedDatetimeRangeEnd)
+}
 
-	// This is a placeholder implementation
-	return []map[string]interface{}{}, nil
+// IterationTimeRangeQueryChecksum performs a checksum query for the current time range
+// on both source and target and compares the results, mirroring IterationQueryChecksum.
+func (ctx *ChecksumContext) IterationTimeRangeQueryChecksum() (isChunkChecksumEqual bool, duration time.Duration, err error) {
+	startTime := time.Now()
+	defer func() {
+		duration = time.Since(startTime)
+	}()
+
+	// 计算CRC32XOR聚合值，还是逐行CRC32值
+	var checkLevel int64 = 1
+	if ctx.Context.IsSuperSetAsEqual {
+		checkLevel = 2
+	}
+
+	go ctx.queryTimeRangeChecksumFunc(ctx.Context.SourceDB, ctx.PerTableContext.SourceDatabaseName, ctx.PerTableContext.SourceTableName, checkLevel, ctx.SourceResultQueue)
+	go ctx.queryTimeRangeChecksumFunc(ctx.Context.TargetDB, ctx.PerTableContext.TargetDatabaseName, ctx.PerTableContext.TargetTableName, checkLevel, ctx.TargetResultQueue)
+	sourceResultStruct, targetResultStruct := <-ctx.SourceResultQueue, <-ctx.TargetResultQueue
+	if sourceResultStruct.err != nil {
+		return false, duration, sourceResultStruct.err
+	}
+	if targetResultStruct.err != nil {
+		return false, duration, targetResultStruct.err
+	}
+	sourceResult, targetResult := sourceResultStruct.result, targetResultStruct.result
+
+	if reflect.DeepEqual(sourceResult, targetResult) {
+		return true, duration, nil
+	}
+	if checkLevel == 2 {
+		return isOrderedSubset(sourceResult, targetResult), duration, nil
+	}
+	return false, duration, nil
+}
+
+// queryTimeRangeChecksumFunc 获取当前时间分批的checksum结果(聚合CRC32XOR 或者 逐行CRC32)
+func (ctx *ChecksumContext) queryTimeRangeChecksumFunc(db *gosql.DB, databaseName, tableName string, checkLevel int64, ch chan *crc32ResultStruct) {
+	var ret []string
+	query, err := builder.BuildTimeRangeChecksumSQL(
+		databaseName,
+		tableName,
+		ctx.CheckColumns,
+		ctx.Context.SpecifiedDatetimeColumn,
+		ctx.isFinalTimeChunk(),
+		checkLevel,
+	)
+	if err != nil {
+		ch <- newCrc32ResultStruct(ret, err)
+		return
+	}
+
+	rows, err := db.Query(query, ctx.TimeIterationRangeMinValue, ctx.TimeIterationRangeMaxValue)
+	if err != nil {
+		ch <- newCrc32ResultStruct(ret, err)
+		return
+	}
+	defer rows.Close()
+	for rows.Next() {
+		rowValues := types.NewColumnValues(1)
+		if err := rows.Scan(rowValues.ValuesPointers...); err != nil {
+			ch <- newCrc32ResultStruct(ret, err)
+			return
+		}
+		ret = append(ret, rowValues.StringColumn(0))
+	}
+	if err = rows.Err(); err != nil {
+		ch <- newCrc32ResultStruct(ret, err)
+		return
+	}
+	ch <- newCrc32ResultStruct(ret, nil)
+}
+
+// isOrderedSubset 判断有序集subset是否superset的子集
+func isOrderedSubset(subset []string, superset []string) bool {
+	startIndex := 0
+	for i := 0; i < len(subset); i++ {
+		founded := false
+		for j := startIndex; j < len(superset); j++ {
+			if subset[i] == superset[j] {
+				startIndex = j + 1
+				founded = true
+				break
+			}
+		}
+		if !founded {
+			return false
+		}
+	}
+	return true
 }

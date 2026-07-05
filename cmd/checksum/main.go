@@ -8,6 +8,7 @@ package main
 import (
 	"flag"
 	"fmt"
+	"os"
 	"sort"
 	"strings"
 	"sync"
@@ -88,6 +89,8 @@ func GenerateTableList(baseContext *types.BaseContext) (err error) {
 	} else if baseContext.SourceTableNameRegexp != "" {
 		// 源表正则匹配
 		baseContext.TableQueryHint = "QueryTableNameWithRegexp"
+	} else {
+		return fmt.Errorf("no source tables specified: use --source-db-name (with optional --source-table-name) or --source-table-regexp")
 	}
 
 	if baseContext.SourceTableFullNameList == nil {
@@ -95,7 +98,7 @@ func GenerateTableList(baseContext *types.BaseContext) (err error) {
 			return fmt.Errorf("critical: Get source table names failed. Please check arguments")
 		}
 		if baseContext.SourceTableFullNameList == nil {
-			return fmt.Errorf("get source table names failed. Please check arguments")
+			return fmt.Errorf("no source tables matched. Please check arguments")
 		}
 	}
 
@@ -109,10 +112,12 @@ func GenerateTableList(baseContext *types.BaseContext) (err error) {
 				baseContext.TargetTableFullNameList = append(baseContext.TargetTableFullNameList, fmt.Sprintf("%s.%s", databaseName, tableName))
 			}
 		}
-		if len(baseContext.SourceTableFullNameList) == len(baseContext.TargetTableFullNameList) {
-			for i, tableName := range baseContext.SourceTableFullNameList {
-				baseContext.PairOfSourceAndTargetTables[tableName] = baseContext.TargetTableFullNameList[i]
-			}
+		if len(baseContext.SourceTableFullNameList) != len(baseContext.TargetTableFullNameList) {
+			return fmt.Errorf("source table list (%d tables) and target table list (%d tables) do not match",
+				len(baseContext.SourceTableFullNameList), len(baseContext.TargetTableFullNameList))
+		}
+		for i, tableName := range baseContext.SourceTableFullNameList {
+			baseContext.PairOfSourceAndTargetTables[tableName] = baseContext.TargetTableFullNameList[i]
 		}
 	} else if baseContext.TargetDatabaseAddSuffix != "" && baseContext.TargetTableAddSuffix != "" {
 		// 目标库表名加后缀
@@ -146,15 +151,37 @@ func GenerateTableList(baseContext *types.BaseContext) (err error) {
 		}
 	}
 
-	if baseContext.PairOfSourceAndTargetTables == nil {
-		return err
+	if len(baseContext.PairOfSourceAndTargetTables) == 0 {
+		return fmt.Errorf("no source/target table pairs could be built. Please check arguments")
 	}
 
 	return nil
 }
 
-// ChecksumPerTable 先判断总记录数，然后逐个分片判断checksum值
-func (job *ChecksumJob) ChecksumPerTable(baseContext *types.BaseContext, tableContext *types.TableContext) (err error) {
+// runDifferentialAnalysis 运行记录级差异分析，必要时先解析核对字段和唯一键
+func runDifferentialAnalysis(baseContext *types.BaseContext, checksumContext *checksum.ChecksumContext) {
+	baseContext.Log.Infof("Running differential analysis for table pair: %s.%s => %s.%s", checksumContext.PerTableContext.SourceDatabaseName, checksumContext.PerTableContext.SourceTableName, checksumContext.PerTableContext.TargetDatabaseName, checksumContext.PerTableContext.TargetTableName)
+	if checksumContext.CheckColumns == nil {
+		if err := checksumContext.GetCheckColumns(); err != nil {
+			baseContext.Log.Errorf("Failed to perform differential analysis: %v", err)
+			return
+		}
+	}
+	if checksumContext.UniqueKey == nil {
+		if err := checksumContext.GetUniqueKeys(); err != nil {
+			baseContext.Log.Errorf("Failed to perform differential analysis: %v", err)
+			return
+		}
+	}
+	differ := &checksum.TableDiffer{Context: checksumContext}
+	if diffErr := differ.AnalyzeAndReportDifferences(); diffErr != nil {
+		baseContext.Log.Errorf("Failed to perform differential analysis: %v", diffErr)
+	}
+}
+
+// ChecksumPerTable 先判断总记录数，然后逐个分片判断checksum值.
+// 返回该表是否核对一致；每个表只返回一次结果，由调用方负责写入结果通道。
+func (job *ChecksumJob) ChecksumPerTable(baseContext *types.BaseContext, tableContext *types.TableContext) (isEqual bool, err error) {
 	startTime := time.Now()
 	var tableCheckDuration time.Duration
 	defer func() {
@@ -170,12 +197,14 @@ func (job *ChecksumJob) ChecksumPerTable(baseContext *types.BaseContext, tableCo
 		baseContext.Log.Debugf("DataChecksumByCount of table pair: %s.%s => %s.%s .", ChecksumContext.PerTableContext.SourceDatabaseName, ChecksumContext.PerTableContext.SourceTableName, ChecksumContext.PerTableContext.TargetDatabaseName, ChecksumContext.PerTableContext.TargetTableName)
 		_, isMoreCheckNeeded, err := ChecksumContext.DataChecksumByCount()
 		if err != nil {
-			baseContext.ChecksumErrChan <- err
+			return false, err
 		}
 		if !isMoreCheckNeeded {
-			baseContext.ChecksumErrChan <- nil
-			baseContext.ChecksumResChan <- false
-			return nil
+			// 行数不一致：如果开启了差异报告，仍然进行记录级分析
+			if baseContext.EnableDifferentialReporting {
+				runDifferentialAnalysis(baseContext, ChecksumContext)
+			}
+			return false, nil
 		}
 	} else {
 		baseContext.Log.Debugf("Ignore DataChecksumByCount of table pair: %s.%s => %s.%s due to IgnoreRowCountCheck=true.", ChecksumContext.PerTableContext.SourceDatabaseName, ChecksumContext.PerTableContext.SourceTableName, ChecksumContext.PerTableContext.TargetDatabaseName, ChecksumContext.PerTableContext.TargetTableName)
@@ -185,35 +214,31 @@ func (job *ChecksumJob) ChecksumPerTable(baseContext *types.BaseContext, tableCo
 	baseContext.Log.Debugf("Get user-request check columns of table pair: %s.%s => %s.%s .", ChecksumContext.PerTableContext.SourceDatabaseName, ChecksumContext.PerTableContext.SourceTableName, ChecksumContext.PerTableContext.TargetDatabaseName, ChecksumContext.PerTableContext.TargetTableName)
 	if ChecksumContext.CheckColumns == nil {
 		if err := ChecksumContext.GetCheckColumns(); err != nil {
-			baseContext.ChecksumErrChan <- err
-			baseContext.ChecksumResChan <- false
+			return false, err
 		}
 	}
 
 	// 获取唯一键、最大最小值
 	baseContext.Log.Debugf("GetUniqueKeys of table pair: %s.%s => %s.%s .", ChecksumContext.PerTableContext.SourceDatabaseName, ChecksumContext.PerTableContext.SourceTableName, ChecksumContext.PerTableContext.TargetDatabaseName, ChecksumContext.PerTableContext.TargetTableName)
 	if err := ChecksumContext.GetUniqueKeys(); err != nil {
-		baseContext.ChecksumErrChan <- err
-		baseContext.ChecksumResChan <- false
-		return err
+		return false, err
 	}
 	baseContext.Log.Debugf("ReadUniqueKeyRangeMinValues of table pair: %s.%s => %s.%s .", ChecksumContext.PerTableContext.SourceDatabaseName, ChecksumContext.PerTableContext.SourceTableName, ChecksumContext.PerTableContext.TargetDatabaseName, ChecksumContext.PerTableContext.TargetTableName)
 	if err := ChecksumContext.ReadUniqueKeyRangeMinValues(); err != nil {
-		baseContext.ChecksumErrChan <- err
-		baseContext.ChecksumResChan <- false
-		return err
+		return false, err
 	}
 	baseContext.Log.Debugf("ReadUniqueKeyRangeMaxValues of table pair: %s.%s => %s.%s .", ChecksumContext.PerTableContext.SourceDatabaseName, ChecksumContext.PerTableContext.SourceTableName, ChecksumContext.PerTableContext.TargetDatabaseName, ChecksumContext.PerTableContext.TargetTableName)
 	if err := ChecksumContext.ReadUniqueKeyRangeMaxValues(); err != nil {
-		baseContext.ChecksumErrChan <- err
-		baseContext.ChecksumResChan <- false
-		return err
+		return false, err
 	}
 
 	// 计算checksum值
 	var hasFurtherRange = true
 	for hasFurtherRange {
 		hasFurtherRange, err = ChecksumContext.CalculateNextIterationRangeEndValues()
+		if err != nil {
+			return false, err
+		}
 		baseContext.Log.Debugf("CalculateNextIterationRangeEndValues of table pair: %s.%s => %s.%s .", ChecksumContext.PerTableContext.SourceDatabaseName, ChecksumContext.PerTableContext.SourceTableName, ChecksumContext.PerTableContext.TargetDatabaseName, ChecksumContext.PerTableContext.TargetTableName)
 
 		var isChunkChecksumEqual bool
@@ -234,30 +259,21 @@ func (job *ChecksumJob) ChecksumPerTable(baseContext *types.BaseContext, tableCo
 			}
 			ChecksumContext.AddIteration()
 			if err != nil {
-				baseContext.ChecksumErrChan <- err
-				baseContext.ChecksumResChan <- false
 				tableCheckDuration = time.Since(startTime)
-				baseContext.Log.Debugf("Debug: Iteration %d, record CRC32 checksum value is not equal of table pair: %s.%s => %s.%s , Duration=%+v", int(ChecksumContext.GetIteration()), ChecksumContext.PerTableContext.SourceDatabaseName, ChecksumContext.PerTableContext.SourceTableName, ChecksumContext.PerTableContext.TargetDatabaseName, ChecksumContext.PerTableContext.TargetTableName, duration)
 				baseContext.Log.Errorf("Critical: record CRC32 checksum value is not equal of table pair: %s.%s => %s.%s , tableCheckDuration=%+v", ChecksumContext.PerTableContext.SourceDatabaseName, ChecksumContext.PerTableContext.SourceTableName, ChecksumContext.PerTableContext.TargetDatabaseName, ChecksumContext.PerTableContext.TargetTableName, tableCheckDuration)
-				return err
+				return false, err
 			}
 			if !isChunkChecksumEqual {
-				baseContext.ChecksumErrChan <- nil
-				baseContext.ChecksumResChan <- false
 				tableCheckDuration = time.Since(startTime)
 				baseContext.Log.Debugf("Debug: Iteration %d, record CRC32 checksum value is not equal of table pair: %s.%s => %s.%s , Duration=%+v", int(ChecksumContext.GetIteration()), ChecksumContext.PerTableContext.SourceDatabaseName, ChecksumContext.PerTableContext.SourceTableName, ChecksumContext.PerTableContext.TargetDatabaseName, ChecksumContext.PerTableContext.TargetTableName, duration)
 				baseContext.Log.Errorf("Critical: record CRC32 checksum value is not equal of table pair: %s.%s => %s.%s , tableCheckDuration=%+v", ChecksumContext.PerTableContext.SourceDatabaseName, ChecksumContext.PerTableContext.SourceTableName, ChecksumContext.PerTableContext.TargetDatabaseName, ChecksumContext.PerTableContext.TargetTableName, tableCheckDuration)
 
 				// If differential reporting is enabled and we found differences, run detailed analysis
 				if baseContext.EnableDifferentialReporting {
-					baseContext.Log.Infof("Running differential analysis for table pair: %s.%s => %s.%s", ChecksumContext.PerTableContext.SourceDatabaseName, ChecksumContext.PerTableContext.SourceTableName, ChecksumContext.PerTableContext.TargetDatabaseName, ChecksumContext.PerTableContext.TargetTableName)
-					differ := &checksum.TableDiffer{Context: ChecksumContext}
-					if diffErr := differ.AnalyzeAndReportDifferences(); diffErr != nil {
-						baseContext.Log.Errorf("Failed to perform differential analysis: %v", diffErr)
-					}
+					runDifferentialAnalysis(baseContext, ChecksumContext)
 				}
 
-				return nil
+				return false, nil
 			}
 			baseContext.Log.Debugf("Debug: Iteration %d, record CRC32 checksum value is equal of table pair: %s.%s => %s.%s , Duration=%+v", int(ChecksumContext.GetIteration()), ChecksumContext.PerTableContext.SourceDatabaseName, ChecksumContext.PerTableContext.SourceTableName, ChecksumContext.PerTableContext.TargetDatabaseName, ChecksumContext.PerTableContext.TargetTableName, duration)
 		}
@@ -271,13 +287,12 @@ func (job *ChecksumJob) ChecksumPerTable(baseContext *types.BaseContext, tableCo
 	CheckSpeed := estimatedRows / elapsedSecond
 	baseContext.Log.Infof("Info: record CRC32 checksum value is equal of table pair: %s.%s => %s.%s , tableCheckDuration=%+v, tableCheckSpeed= %+v rows/second.", ChecksumContext.PerTableContext.SourceDatabaseName, ChecksumContext.PerTableContext.SourceTableName, ChecksumContext.PerTableContext.TargetDatabaseName, ChecksumContext.PerTableContext.TargetTableName, tableCheckDuration, CheckSpeed)
 	baseContext.Log.Infof("End check table pair: %s.%s => %s.%s .", ChecksumContext.PerTableContext.SourceDatabaseName, ChecksumContext.PerTableContext.SourceTableName, ChecksumContext.PerTableContext.TargetDatabaseName, ChecksumContext.PerTableContext.TargetTableName)
-	baseContext.ChecksumErrChan <- nil
-	baseContext.ChecksumResChan <- true
-	return nil
+	return true, nil
 }
 
-// ChecksumPerTableViaTimeColumn 使用指定的时间字段增量核对
-func (job *ChecksumJob) ChecksumPerTableViaTimeColumn(baseContext *types.BaseContext, tableContext *types.TableContext) (err error) {
+// ChecksumPerTableViaTimeColumn 使用指定的时间字段增量核对.
+// 返回该表是否核对一致；每个表只返回一次结果，由调用方负责写入结果通道。
+func (job *ChecksumJob) ChecksumPerTableViaTimeColumn(baseContext *types.BaseContext, tableContext *types.TableContext) (isEqual bool, err error) {
 	startTime := time.Now()
 	var tableCheckDuration time.Duration
 	defer func() {
@@ -288,37 +303,34 @@ func (job *ChecksumJob) ChecksumPerTableViaTimeColumn(baseContext *types.BaseCon
 	ChecksumContext := checksum.NewChecksumContext(baseContext, tableContext)
 	baseContext.Log.Infof("Starting check table pair: %s.%s => %s.%s .", ChecksumContext.PerTableContext.SourceDatabaseName, ChecksumContext.PerTableContext.SourceTableName, ChecksumContext.PerTableContext.TargetDatabaseName, ChecksumContext.PerTableContext.TargetTableName)
 
-	// 判断用户有没有输入checkcolumn，没有则取全表左右核对字段
+	// 判断用户有没有输入checkcolumn，没有则取全表所有字段作为核对字段
 	baseContext.Log.Debugf("Get user-request check columns of table pair: %s.%s => %s.%s .", ChecksumContext.PerTableContext.SourceDatabaseName, ChecksumContext.PerTableContext.SourceTableName, ChecksumContext.PerTableContext.TargetDatabaseName, ChecksumContext.PerTableContext.TargetTableName)
 	if ChecksumContext.CheckColumns == nil {
 		if err := ChecksumContext.GetCheckColumns(); err != nil {
-			baseContext.ChecksumErrChan <- err
-			baseContext.ChecksumResChan <- false
-			return err
+			return false, err
 		}
 	}
 
 	// 获取时间列、最大最小值
 	baseContext.Log.Debugf("GetTimeColumn of table pair: %s.%s => %s.%s.", ChecksumContext.PerTableContext.SourceDatabaseName, ChecksumContext.PerTableContext.SourceTableName, ChecksumContext.PerTableContext.TargetDatabaseName, ChecksumContext.PerTableContext.TargetTableName)
 	if err := ChecksumContext.GetTimeColumn(); err != nil {
-		baseContext.ChecksumErrChan <- err
-		baseContext.ChecksumResChan <- false
-		return err
+		return false, err
 	}
 	baseContext.Log.Debugf("Time column values range [%s-%s] of table pair: %s.%s => %s.%s .", ChecksumContext.Context.SpecifiedDatetimeRangeBegin, ChecksumContext.Context.SpecifiedDatetimeRangeEnd, ChecksumContext.PerTableContext.SourceDatabaseName, ChecksumContext.PerTableContext.SourceTableName, ChecksumContext.PerTableContext.TargetDatabaseName, ChecksumContext.PerTableContext.TargetTableName)
 
 	// 获取满足TimeRange核对条件的估算行数
 	estimatedRows, err := ChecksumContext.EstimateTableRowsViaExplain()
 	if err != nil {
-		baseContext.ChecksumErrChan <- err
-		baseContext.ChecksumResChan <- false
-		return err
+		return false, err
 	}
 
 	// 计算checksum值
 	var hasFurtherRange = true
 	for hasFurtherRange {
 		hasFurtherRange, err = ChecksumContext.CalculateNextIterationTimeRange()
+		if err != nil {
+			return false, err
+		}
 		baseContext.Log.Debugf("CalculateNextIterationTimeRange [hasFurtherRange=%t] of table pair: %s.%s => %s.%s.", hasFurtherRange, ChecksumContext.PerTableContext.SourceDatabaseName, ChecksumContext.PerTableContext.SourceTableName, ChecksumContext.PerTableContext.TargetDatabaseName, ChecksumContext.PerTableContext.TargetTableName)
 
 		var isChunkChecksumEqual bool
@@ -328,9 +340,9 @@ func (job *ChecksumJob) ChecksumPerTableViaTimeColumn(baseContext *types.BaseCon
 			for i := 0; i < int(ChecksumContext.Context.DefaultNumRetries); i++ {
 				if i != 0 {
 					time.Sleep(1 * time.Second)
-					baseContext.Log.Debugf("IterationTimeRangeQueryChecksum [%s-%s] retry times %d of table pair: %s.%s => %s.%s .", ChecksumContext.ChecksumIterationRangeMinValues.AbstractValues(), ChecksumContext.ChecksumIterationRangeMaxValues.AbstractValues(), i, ChecksumContext.PerTableContext.SourceDatabaseName, ChecksumContext.PerTableContext.SourceTableName, ChecksumContext.PerTableContext.TargetDatabaseName, ChecksumContext.PerTableContext.TargetTableName)
+					baseContext.Log.Debugf("IterationTimeRangeQueryChecksum [%s-%s] retry times %d of table pair: %s.%s => %s.%s .", ChecksumContext.TimeIterationRangeMinValue, ChecksumContext.TimeIterationRangeMaxValue, i, ChecksumContext.PerTableContext.SourceDatabaseName, ChecksumContext.PerTableContext.SourceTableName, ChecksumContext.PerTableContext.TargetDatabaseName, ChecksumContext.PerTableContext.TargetTableName)
 				} else {
-					baseContext.Log.Debugf("IterationTimeRangeQueryChecksum [%s-%s] of table pair: %s.%s => %s.%s .", ChecksumContext.ChecksumIterationRangeMinValues.AbstractValues(), ChecksumContext.ChecksumIterationRangeMaxValues.AbstractValues(), ChecksumContext.PerTableContext.SourceDatabaseName, ChecksumContext.PerTableContext.SourceTableName, ChecksumContext.PerTableContext.TargetDatabaseName, ChecksumContext.PerTableContext.TargetTableName)
+					baseContext.Log.Debugf("IterationTimeRangeQueryChecksum [%s-%s] of table pair: %s.%s => %s.%s .", ChecksumContext.TimeIterationRangeMinValue, ChecksumContext.TimeIterationRangeMaxValue, ChecksumContext.PerTableContext.SourceDatabaseName, ChecksumContext.PerTableContext.SourceTableName, ChecksumContext.PerTableContext.TargetDatabaseName, ChecksumContext.PerTableContext.TargetTableName)
 				}
 				isChunkChecksumEqual, duration, err = ChecksumContext.IterationTimeRangeQueryChecksum()
 				if err == nil && isChunkChecksumEqual {
@@ -339,30 +351,22 @@ func (job *ChecksumJob) ChecksumPerTableViaTimeColumn(baseContext *types.BaseCon
 			}
 			ChecksumContext.AddIteration()
 			if err != nil {
-				baseContext.ChecksumErrChan <- err
-				baseContext.ChecksumResChan <- false
 				tableCheckDuration = time.Since(startTime)
-				baseContext.Log.Debugf("Debug: Iteration %d, record CRC32 checksum value is not equal of table pair: %s.%s => %s.%s , Duration=%+v", int(ChecksumContext.GetIteration()), ChecksumContext.PerTableContext.SourceDatabaseName, ChecksumContext.PerTableContext.SourceTableName, ChecksumContext.PerTableContext.TargetDatabaseName, ChecksumContext.PerTableContext.TargetTableName, duration)
 				baseContext.Log.Errorf("Critical: record CRC32 checksum value is not equal of table pair: %s.%s => %s.%s , tableCheckDuration=%+v", ChecksumContext.PerTableContext.SourceDatabaseName, ChecksumContext.PerTableContext.SourceTableName, ChecksumContext.PerTableContext.TargetDatabaseName, ChecksumContext.PerTableContext.TargetTableName, tableCheckDuration)
-				return err
+				return false, err
 			}
 			if !isChunkChecksumEqual {
-				baseContext.ChecksumErrChan <- nil
-				baseContext.ChecksumResChan <- false
 				tableCheckDuration = time.Since(startTime)
 				baseContext.Log.Debugf("Debug: Iteration %d, record CRC32 checksum value is not equal of table pair: %s.%s => %s.%s , Duration=%+v", int(ChecksumContext.GetIteration()), ChecksumContext.PerTableContext.SourceDatabaseName, ChecksumContext.PerTableContext.SourceTableName, ChecksumContext.PerTableContext.TargetDatabaseName, ChecksumContext.PerTableContext.TargetTableName, duration)
 				baseContext.Log.Errorf("Critical: record CRC32 checksum value is not equal of table pair: %s.%s => %s.%s , tableCheckDuration=%+v", ChecksumContext.PerTableContext.SourceDatabaseName, ChecksumContext.PerTableContext.SourceTableName, ChecksumContext.PerTableContext.TargetDatabaseName, ChecksumContext.PerTableContext.TargetTableName, tableCheckDuration)
 
-				// If differential reporting is enabled and we found differences, run detailed analysis
+				// If differential reporting is enabled and we found differences, run detailed analysis.
+				// Note: the differential analysis walks the unique key over the whole table.
 				if baseContext.EnableDifferentialReporting {
-					baseContext.Log.Infof("Running differential analysis for table pair: %s.%s => %s.%s", ChecksumContext.PerTableContext.SourceDatabaseName, ChecksumContext.PerTableContext.SourceTableName, ChecksumContext.PerTableContext.TargetDatabaseName, ChecksumContext.PerTableContext.TargetTableName)
-					differ := &checksum.TableDiffer{Context: ChecksumContext}
-					if diffErr := differ.AnalyzeAndReportDifferences(); diffErr != nil {
-						baseContext.Log.Errorf("Failed to perform differential analysis: %v", diffErr)
-					}
+					runDifferentialAnalysis(baseContext, ChecksumContext)
 				}
 
-				return nil
+				return false, nil
 			}
 			baseContext.Log.Debugf("Debug: Iteration %d, record CRC32 checksum value is equal of table pair: %s.%s => %s.%s , Duration=%+v", int(ChecksumContext.GetIteration()), ChecksumContext.PerTableContext.SourceDatabaseName, ChecksumContext.PerTableContext.SourceTableName, ChecksumContext.PerTableContext.TargetDatabaseName, ChecksumContext.PerTableContext.TargetTableName, duration)
 		}
@@ -376,9 +380,7 @@ func (job *ChecksumJob) ChecksumPerTableViaTimeColumn(baseContext *types.BaseCon
 	CheckSpeed := estimatedRows / elapsedSecond
 	baseContext.Log.Infof("Info: record CRC32 checksum value is equal of table pair: %s.%s => %s.%s , tableCheckDuration=%+v, tableCheckSpeed= %+v rows/second.", ChecksumContext.PerTableContext.SourceDatabaseName, ChecksumContext.PerTableContext.SourceTableName, ChecksumContext.PerTableContext.TargetDatabaseName, ChecksumContext.PerTableContext.TargetTableName, tableCheckDuration, CheckSpeed)
 	baseContext.Log.Infof("End check table pair: %s.%s => %s.%s .", ChecksumContext.PerTableContext.SourceDatabaseName, ChecksumContext.PerTableContext.SourceTableName, ChecksumContext.PerTableContext.TargetDatabaseName, ChecksumContext.PerTableContext.TargetTableName)
-	baseContext.ChecksumErrChan <- nil
-	baseContext.ChecksumResChan <- true
-	return nil
+	return true, nil
 }
 
 // 核对任务
@@ -387,6 +389,7 @@ func (job *ChecksumJob) checksum(baseContext *types.BaseContext) {
 	if err := GenerateTableList(baseContext); err != nil {
 		baseContext.Log.Errorf("Generating source and target tables failed, %s", err.Error())
 		baseContext.PanicAbort <- err
+		return
 	}
 
 	// 逐个表进行核对, 按顺序去除map的元素
@@ -404,6 +407,7 @@ func (job *ChecksumJob) checksum(baseContext *types.BaseContext) {
 		baseContext.Log.Infof("Table map: %s => %s .", key, baseContext.PairOfSourceAndTargetTables[key])
 	}
 
+	isDatetimeColumnSpecified := baseContext.IsDatetimeColumnSpecified()
 	for _, key := range keys {
 		sourceFullTableName := key
 		targetFullTableName := baseContext.PairOfSourceAndTargetTables[key]
@@ -415,15 +419,21 @@ func (job *ChecksumJob) checksum(baseContext *types.BaseContext) {
 
 		job.ChecksumJobChan <- 1
 		job.wg.Add(1)
-		// 使用主键/时间字段核对
-		if isDatetimeColumnSpecified := baseContext.IsDatetimeColumnSpecified(); isDatetimeColumnSpecified {
-			go job.ChecksumPerTableViaTimeColumn(baseContext, tableContext)
-		} else {
-			go job.ChecksumPerTable(baseContext, tableContext)
-		}
+		// 使用主键/时间字段核对。每个表只向结果通道写入一次 (result, error)。
+		go func() {
+			var isEqual bool
+			var err error
+			if isDatetimeColumnSpecified {
+				isEqual, err = job.ChecksumPerTableViaTimeColumn(baseContext, tableContext)
+			} else {
+				isEqual, err = job.ChecksumPerTable(baseContext, tableContext)
+			}
+			baseContext.ChecksumResChan <- isEqual
+			baseContext.ChecksumErrChan <- err
+		}()
 	}
 
-	for i := 0; i < len(baseContext.PairOfSourceAndTargetTables); i++ {
+	for i := 0; i < tableNum; i++ {
 		if ret := <-baseContext.ChecksumResChan; ret {
 			tableResultEqualNum += 1
 		}
@@ -432,8 +442,8 @@ func (job *ChecksumJob) checksum(baseContext *types.BaseContext) {
 			baseContext.Log.Errorf("%s", err.Error())
 		}
 	}
-	if tableResultEqualNum == tableNum && tableResultEqualNum != 0 {
-		baseContext.Log.Infof("All pairs of tables check result is equal.")
+	if tableResultEqualNum == tableNum {
+		baseContext.Log.Infof("All %d pairs of tables check result is equal.", tableNum)
 	} else {
 		baseContext.Log.Errorf("Table records check result %d equal, %d not equal.", tableResultEqualNum, tableNum-tableResultEqualNum)
 	}
@@ -467,7 +477,7 @@ func main() {
 	specifiedDatetimeRangeBegin := flag.String("specified-time-begin", "", "Specified begin time of time column to check.")
 	specifiedDatetimeRangeEnd := flag.String("specified-time-end", "", "Specified end time of time column to check.")
 	chunkSize := flag.Int64("chunk-size", 1000, "amount of rows to handle in each iteration (allowed range: 10-100,000)")
-	defaultRetries := flag.Int64("default-retries", 5, "Default number of retries for various operations before panicking")
+	defaultRetries := flag.Int64("default-retries", 10, "Default number of retries for various operations before panicking")
 	flag.BoolVar(&baseContext.EnableDifferentialReporting, "enable-differential-reporting", false, "Enable detailed differential reporting showing which records differ by primary key")
 	flag.IntVar(&baseContext.MaxSampleDifferences, "max-sample-differences", 100, "Maximum number of sample differences to collect during analysis (default: 100)")
 	flag.IntVar(&baseContext.MaxDisplayDifferences, "max-display-differences", 10, "Maximum number of differences to display in output (default: 10)")
@@ -493,12 +503,21 @@ func main() {
 	go baseContext.ListenOnPanicAbort()
 
 	if err := baseContext.SetSpecifiedDatetimeRange(*specifiedDatetimeRangeBegin, *specifiedDatetimeRangeEnd); err != nil {
-		baseContext.Log.Errorf("Illegal time range for time column, please check!")
-		baseContext.PanicAbort <- err
+		baseContext.Log.Fatalf("Illegal time range for time column (%v), please check!", err)
 	}
 	baseContext.SetChunkSize(*chunkSize)
 	baseContext.SetDefaultNumRetries(*defaultRetries)
 	baseContext.SetLogLevel(*debug, *logFile)
+
+	// GenerateSyncSQL appends per table within a run; truncate any stale file
+	// from a previous run so the output only contains this run's statements.
+	if baseContext.GenerateSyncSQL && baseContext.SyncSQLFile != "" {
+		if file, err := os.OpenFile(baseContext.SyncSQLFile, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644); err != nil {
+			baseContext.Log.Fatalf("Cannot write sync SQL file %s: %v", baseContext.SyncSQLFile, err)
+		} else {
+			file.Close()
+		}
+	}
 
 	startTime := time.Now()
 	defer func() {
@@ -506,10 +525,9 @@ func main() {
 		baseContext.Log.Infof("Finished go-data-checksum. TotalDuration=%+v", time.Since(startTime))
 	}()
 	// 初始化源和目标库连接
-	baseContext.Log.Infof("Staring go-data-checksum %+v...", AppVersion)
+	baseContext.Log.Infof("Starting go-data-checksum %+v...", AppVersion)
 	if err := baseContext.InitDB(); err != nil {
-		baseContext.Log.Errorf("DB connection initiate failed.")
-		baseContext.PanicAbort <- err
+		baseContext.Log.Fatalf("DB connection initiate failed: %v", err)
 	}
 
 	// 核对任务

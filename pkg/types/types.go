@@ -86,21 +86,21 @@ type BaseContext struct {
 	SpecifiedDatetimeRangeEnd   time.Time
 	IgnoreRowCountCheck         bool
 
-	ChunkSize                    int64
-	DefaultNumRetries            int64
-	IsSuperSetAsEqual            bool
-	EnableDifferentialReporting  bool
-	MaxSampleDifferences         int
-	MaxDisplayDifferences        int
-	GenerateSyncSQL              bool
-	SyncSQLFile                  string
-	ParallelThreads              int
-	ChecksumResChan              chan bool
-	ChecksumErrChan              chan error
-	PanicAbort                   chan error
-	throttleMutex                *sync.Mutex
-	Log                          *log.Logger
-	Logfile                      string
+	ChunkSize                   int64
+	DefaultNumRetries           int64
+	IsSuperSetAsEqual           bool
+	EnableDifferentialReporting bool
+	MaxSampleDifferences        int
+	MaxDisplayDifferences       int
+	GenerateSyncSQL             bool
+	SyncSQLFile                 string
+	ParallelThreads             int
+	ChecksumResChan             chan bool
+	ChecksumErrChan             chan error
+	PanicAbort                  chan error
+	throttleMutex               *sync.Mutex
+	Log                         *log.Logger
+	Logfile                     string
 }
 
 func NewBaseContext() *BaseContext {
@@ -109,9 +109,9 @@ func NewBaseContext() *BaseContext {
 		DefaultNumRetries:     10,
 		MaxSampleDifferences:  100,
 		MaxDisplayDifferences: 10,
-		PanicAbort:        make(chan error),
-		throttleMutex:     &sync.Mutex{},
-		Log:               log.New(),
+		PanicAbort:            make(chan error),
+		throttleMutex:         &sync.Mutex{},
+		Log:                   log.New(),
 	}
 }
 
@@ -180,8 +180,8 @@ func (ctx *BaseContext) IsDatetimeColumnSpecified() bool {
 }
 
 func (ctx *BaseContext) GetDBUri(databaseName string) (string, string) {
-	sourceDBUri := fmt.Sprintf("%s:%s@tcp(%s:%d)/%s?parseTime=true&loc=Local&timeout=%ds&readTimeout=%ds&writeTimeout=%ds&interpolateParams=true&charset=latin1", ctx.SourceDBUser, ctx.SourceDBPass, ctx.SourceDBHost, ctx.SourceDBPort, databaseName, ctx.Timeout, ctx.Timeout, ctx.Timeout)
-	targetDBUri := fmt.Sprintf("%s:%s@tcp(%s:%d)/%s?parseTime=true&loc=Local&timeout=%ds&readTimeout=%ds&writeTimeout=%ds&interpolateParams=true&charset=latin1", ctx.TargetDBUser, ctx.TargetDBPass, ctx.TargetDBHost, ctx.TargetDBPort, databaseName, ctx.Timeout, ctx.Timeout, ctx.Timeout)
+	sourceDBUri := fmt.Sprintf("%s:%s@tcp(%s:%d)/%s?parseTime=true&loc=Local&timeout=%ds&readTimeout=%ds&writeTimeout=%ds&interpolateParams=true&charset=utf8mb4", ctx.SourceDBUser, ctx.SourceDBPass, ctx.SourceDBHost, ctx.SourceDBPort, databaseName, ctx.Timeout, ctx.Timeout, ctx.Timeout)
+	targetDBUri := fmt.Sprintf("%s:%s@tcp(%s:%d)/%s?parseTime=true&loc=Local&timeout=%ds&readTimeout=%ds&writeTimeout=%ds&interpolateParams=true&charset=utf8mb4", ctx.TargetDBUser, ctx.TargetDBPass, ctx.TargetDBHost, ctx.TargetDBPort, databaseName, ctx.Timeout, ctx.Timeout, ctx.Timeout)
 	return sourceDBUri, targetDBUri
 }
 
@@ -359,7 +359,7 @@ func (cl *ColumnList) String() string {
 }
 
 func (cl *ColumnList) Equals(other *ColumnList) bool {
-	return reflect.DeepEqual(cl.Columns, other.Columns)
+	return reflect.DeepEqual(cl.columns, other.columns)
 }
 
 func (cl *ColumnList) EqualsByNames(other *ColumnList) bool {

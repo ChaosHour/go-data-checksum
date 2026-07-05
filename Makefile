@@ -2,9 +2,11 @@
 
 # Variables
 APP_NAME := go-data-checksum
+SYNC_APP_NAME := go-data-sync
 BUILD_DIR := bin
 CMD_DIR := cmd/checksum
 MAIN_FILE := $(CMD_DIR)/main.go
+SYNC_MAIN_FILE := cmd/sync/main.go
 GO_FILES := $(shell find . -name "*.go" -type f -not -path "./vendor/*")
 
 VERSION := $(shell cat RELEASE_VERSION 2>/dev/null || echo "dev")
@@ -25,10 +27,12 @@ all: build
 $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)
 
-# Build the binary
+# Build the binaries
 build: $(BUILD_DIR)
 	$(GO_BUILD) -o $(BUILD_DIR)/$(APP_NAME) $(MAIN_FILE)
 	@echo "Binary built at $(BUILD_DIR)/$(APP_NAME)"
+	$(GO_BUILD) -o $(BUILD_DIR)/$(SYNC_APP_NAME) $(SYNC_MAIN_FILE)
+	@echo "Binary built at $(BUILD_DIR)/$(SYNC_APP_NAME)"
 
 # Run tests
 test:
