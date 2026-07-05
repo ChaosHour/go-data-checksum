@@ -27,12 +27,14 @@ The tool automatically detects and uses the best unique key for data chunking:
 
 ## BUILD
 ```
-go build -o bin/go-data-checksum cmd/checksum/main.go
+make build     # builds bin/go-data-checksum and bin/go-data-sync
+make test      # runs the unit tests
 ```
 
-Or use the Makefile:
+Or build the binaries directly:
 ```
-make build
+go build -o bin/go-data-checksum cmd/checksum/main.go
+go build -o bin/go-data-sync cmd/sync/main.go
 ```
 
 ## USAGE
@@ -116,82 +118,127 @@ make build
 
 ## EXAMPLES
 
-### 1. Your Original Use Case Enhanced with Differential Reporting
+### 1. Quick start: compare one database between two instances
 ```bash
-# Compare all tables in a specific database with detailed difference reporting
+# Checks every table in app_db on the source against the same-named tables
+# on the target. Fails fast per table on a row-count mismatch, then verifies
+# contents chunk by chunk with CRC32.
 ./bin/go-data-checksum \
-  --source-db-host=dev-sandbox.com \
-  --source-db-port=3306 \
-  --source-db-user=flyway \
-  --source-db-password="xxxx" \
-  --target-db-host=dev-sandbox.com \
-  --target-db-port=3306 \
-  --target-db-user=flyway \
-  --target-db-password="xxxx" \
-  --source-db-name="dba" \
-  --ignore-row-count-check \
-  --is-superset-as-equal \
+  --source-db-host="prod.example.com"    --source-db-port=3306 \
+  --source-db-user="checker"             --source-db-password="xxxx" \
+  --target-db-host="replica.example.com" --target-db-port=3306 \
+  --target-db-user="checker"             --target-db-password="xxxx" \
+  --source-db-name="app_db" \
+  --threads=4
+```
+Exit summary: `All N pairs of tables check result is equal.` or
+`Table records check result X equal, Y not equal.`
+
+### 2. Verify a replica and see exactly which records drifted
+```bash
+# --enable-differential-reporting rescans any unequal table and reports
+# per-record differences by primary key:
+#   -  record exists only on the SOURCE   (missing on the replica)
+#   +  record exists only on the TARGET   (extra on the replica)
+#   ~  record exists on both but differs  (modified on the replica)
+./bin/go-data-checksum \
+  --source-db-host="192.168.50.75" --source-db-port=3306 \
+  --source-db-user="root"          --source-db-password="xxxx" \
+  --target-db-host="192.168.50.75" --target-db-port=3307 \
+  --target-db-user="root"          --target-db-password="xxxx" \
+  --source-db-name="sbtest" \
   --enable-differential-reporting \
+  --max-display-differences=25 \
+  --logfile="comparison.log"
+```
+
+### 3. Full repair workflow: find, review, sync, re-verify
+```bash
+# Step 1 — find differences and write REPLACE INTO statements to a file.
+# Raise --max-sample-differences to cover every difference; the tool warns
+# (in the log and inside the file) if the file is incomplete.
+./bin/go-data-checksum \
+  --source-db-host="prod.example.com"    --source-db-user="checker" --source-db-password="xxxx" \
+  --target-db-host="replica.example.com" --target-db-user="checker" --target-db-password="xxxx" \
+  --source-db-name="app_db" \
+  --source-table-name="orders" \
+  --enable-differential-reporting \
+  --generate-sync-sql \
+  --sync-sql-file="sync_orders.sql" \
+  --max-sample-differences=10000
+
+# Step 2 — review what would be applied (go-data-sync is dry-run by default)
+./bin/go-data-sync --sql-file="sync_orders.sql" \
+  --target-db-host="replica.example.com" --target-db-user="admin" --target-db-password="xxxx"
+
+# Step 3 — apply in transactional batches
+./bin/go-data-sync --sql-file="sync_orders.sql" \
+  --target-db-host="replica.example.com" --target-db-user="admin" --target-db-password="xxxx" \
+  --execute
+
+# Step 4 — re-verify: the table pair should now report equal
+./bin/go-data-checksum \
+  --source-db-host="prod.example.com"    --source-db-user="checker" --source-db-password="xxxx" \
+  --target-db-host="replica.example.com" --target-db-user="checker" --target-db-password="xxxx" \
+  --source-db-name="app_db" --source-table-name="orders" \
+  --enable-differential-reporting
+```
+Note: target-only records (`+`) are *never* included in sync SQL — removing
+rows from the target requires a manual, reviewed DELETE.
+
+### 4. Select tables by regular expression
+```bash
+# Check every table matching sbtest.sbtest* across instances
+./bin/go-data-checksum \
+  --source-db-host="1.1.1.1" --source-db-port=3307 --source-db-user="test" --source-db-password="xxxx" \
+  --target-db-host="8.8.8.8" --target-db-port=3306 --target-db-user="test" --target-db-password="xxxx" \
+  --source-table-regexp="sbtest\.sbtest.*" \
   --threads=4
 ```
 
-### 2. Single Table Detailed Analysis
+### 5. Incremental check on a time column (large tables)
 ```bash
-# Get detailed differences for a specific table
+# Only verify rows whose updated_at falls inside the window, walking it in
+# 30-minute steps. Ideal for hourly/daily incremental verification jobs
+# where a full-table pass is too expensive.
 ./bin/go-data-checksum \
-  --source-db-host="source.example.com" \
-  --source-db-port=3306 \
-  --source-db-user="user" \
-  --source-db-password="pass" \
-  --target-db-host="target.example.com" \
-  --target-db-port=3306 \
-  --target-db-user="user" \
-  --target-db-password="pass" \
+  --source-db-host="prod.example.com"    --source-db-user="checker" --source-db-password="xxxx" \
+  --target-db-host="replica.example.com" --target-db-user="checker" --target-db-password="xxxx" \
   --source-db-name="app_db" \
-  --source-table-name="users" \
-  --enable-differential-reporting \
-  --debug \
-  --threads=1
+  --source-table-name="events" \
+  --specified-time-column="updated_at" \
+  --specified-time-begin="2026-07-04 00:00:00" \
+  --specified-time-end="2026-07-05 00:00:00" \
+  --time-range-per-step=30m \
+  --enable-differential-reporting
 ```
 
-### 3. Generate Sync SQL for Data Synchronization (NEW!)
+### 6. Compare differently-named targets (migration / shadow tables)
 ```bash
-# Generate REPLACE INTO statements to synchronize differences
+# Source app_db.users vs target app_db_new.users_v2 — explicit mapping
 ./bin/go-data-checksum \
-  --source-db-host="source.example.com" \
-  --source-db-port=3306 \
-  --source-db-user="user" \
-  --source-db-password="pass" \
-  --target-db-host="target.example.com" \
-  --target-db-port=3306 \
-  --target-db-user="user" \
-  --target-db-password="pass" \
-  --source-db-name="app_db" \
-  --source-table-name="users" \
-  --enable-differential-reporting \
-  --generate-sync-sql \
-  --sync-sql-file="sync_users.sql" \
-  --max-sample-differences=1000 \
-  --threads=1
+  ... connection flags ... \
+  --source-db-name="app_db"      --source-table-name="users" \
+  --target-db-name="app_db_new"  --target-table-name="users_v2"
 
-# Apply the generated SQL to synchronize the target
-mysql -h target.example.com -u user -p target_db < sync_users.sql
+# Or by suffix: app_db.users vs app_db.users_new for every source table
+./bin/go-data-checksum \
+  ... connection flags ... \
+  --source-db-name="app_db" \
+  --target-table-add-suffix="_new"
 ```
 
-### 4. Output Sync SQL to stdout
+### 7. Check only specific columns / tolerate a superset target
 ```bash
-# Generate sync SQL to stdout for piping
+# Compare only the business columns (skip audit/metadata columns), and
+# accept the target having extra rows (e.g. target keeps soft-deleted rows).
+# Note: sync SQL still always writes FULL rows, regardless of this flag.
 ./bin/go-data-checksum \
-  --source-db-host="source.example.com" \
-  --source-db-user="user" \
-  --source-db-password="pass" \
-  --target-db-host="target.example.com" \
-  --target-db-user="user" \
-  --target-db-password="pass" \
-  --source-db-name="app_db" \
-  --source-table-name="users" \
-  --enable-differential-reporting \
-  --generate-sync-sql | tee sync.sql
+  ... connection flags ... \
+  --source-db-name="app_db" --source-table-name="accounts" \
+  --check-column-names="id,email,balance,status" \
+  --is-superset-as-equal \
+  --ignore-row-count-check
 ```
 
 ## UNDERSTANDING DIFFERENTIAL OUTPUT
@@ -285,54 +332,16 @@ REPLACE INTO `target_db`.`users` (`id`, `name`, `email`, `created_at`) VALUES (7
 
 ### Best Practices
 
-1. **Review Before Applying**: Always review generated SQL before execution
+1. **Review Before Applying**: Always review generated SQL before execution —
+   `go-data-sync` runs in dry-run mode by default for exactly this reason
 2. **Test on Staging**: Test sync SQL on non-production environments first
 3. **Backup Target**: Take a backup of target database before applying changes
-4. **Handle Target-Only**: Manually review and handle target-only records
-5. **Use Transactions**: Wrap sync SQL in transactions when applying:
-   ```sql
-   START TRANSACTION;
-   source sync.sql
-   COMMIT;  -- or ROLLBACK if something looks wrong
-   ```
-
-### Workflow Example
-
-```bash
-# Step 1: Find differences and generate sync SQL
-./bin/go-data-checksum \
-  --source-db-host="prod.example.com" \
-  --source-db-user="readonly" \
-  --source-db-password="xxx" \
-  --target-db-host="replica.example.com" \
-  --target-db-user="readonly" \
-  --target-db-password="xxx" \
-  --source-db-name="production" \
-  --source-table-name="orders" \
-  --enable-differential-reporting \
-  --generate-sync-sql \
-  --sync-sql-file="sync_orders.sql" \
-  --max-sample-differences=10000
-
-# Step 2: Review the generated SQL
-less sync_orders.sql
-
-# Step 3: Apply to target (with transaction)
-mysql -h replica.example.com -u admin -p -e "
-START TRANSACTION;
-source sync_orders.sql;
--- Review changes here
-COMMIT;
-"
-
-# Step 4: Verify sync worked
-./bin/go-data-checksum \
-  --source-db-host="prod.example.com" \
-  --target-db-host="replica.example.com" \
-  --source-db-name="production" \
-  --source-table-name="orders" \
-  --enable-differential-reporting
-```
+4. **Handle Target-Only**: Manually review and handle target-only records —
+   they are never included in the generated SQL
+5. **Apply with go-data-sync**: it validates that the file contains only
+   REPLACE INTO statements and applies them in transactional batches
+   (see "COMPANION CLI: go-data-sync" below and EXAMPLES #3 for the full
+   find → review → sync → re-verify workflow)
 
 
 ## TEST

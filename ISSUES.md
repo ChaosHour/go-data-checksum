@@ -155,3 +155,9 @@ Status legend: `[ ]` open · `[x]` fixed · `[~]` documented / deferred
   reviewed sync SQL file to the target with `--dry-run` (default) / `--execute`,
   transactional batches, per-statement error reporting, and a rows-affected
   summary. Built via `make build` alongside the checksum binary.
+- [x] **N2. Unit tests** — added coverage for the SQL builders (range/composite
+  key explosion, checksum and time-range queries), types (column lists, scan
+  pointer binding, chunk-size clamping, datetime-range validation, utf8mb4
+  DSN), checksum logic (ordered-subset check, time-range iteration/final-chunk
+  bounds, sample capping), and the sync CLI's file parser (REPLACE-only
+  validation, comment/blank handling, line numbers). Run with `make test`.
