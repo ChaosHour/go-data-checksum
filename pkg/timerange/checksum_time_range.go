@@ -23,7 +23,7 @@ func NewTimeRangeAdapter(ctx *checksum.ChecksumContext) *TimeRangeAdapter {
 	}
 }
 
-// EstimateTableRowsViaExplain 获取满足TimeRange核对条件的估算行数
+// EstimateTableRowsViaExplain estimates the number of rows matching the time-range check
 func (a *TimeRangeAdapter) EstimateTableRowsViaExplain() (estimatedRows int, err error) {
 	ctx := a.Context
 	query := fmt.Sprintf(`

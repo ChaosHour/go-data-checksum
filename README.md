@@ -1,10 +1,8 @@
-# go-data-checksum 数据核对工具
+# go-data-checksum
 
 ## DESCRIPTION
 go-data-checksum is a high-performance data check tool to verify data integrity between MySQL databases/tables. go-data-checksum supports full data check via primary key and incremental data check via specified time field; supports full field check or specified field check also.
 
-go-data-checksum是一款高性能的MySQL数据库/表数据核对工具。go-data-checksum 可以支持按照主键的全量数据核对，和按照时间字段的增量数据核对；可以支持全字段核对或者指定字段核对。
-go-data-checksum 可以支持跨MySQL实例的多表并行核对，并且支持目标表的数据是源表的超集的场景。核对原理为，计算并比较待核对数据的CRC32值。
 
 ## NEW FEATURES
 
@@ -39,7 +37,7 @@ go build -o bin/go-data-sync cmd/sync/main.go
 
 ## USAGE
 ```
-# 使用帮助
+# Usage help
 ./bin/go-data-checksum --help
 
   -check-column-names string
@@ -604,17 +602,17 @@ go-data-checksum is a high-performance MySQL database/table data verification to
 ### Key Capabilities
 
 #### 1. Comprehensive Data Verification Methods
-- **Primary Key-based Full Data Verification (按照主键的全量数据核对)**: Complete table comparison using primary keys for chunking and ordering
-- **Time Field-based Incremental Verification (按照时间字段的增量数据核对)**: Incremental data checking based on specified timestamp columns for efficient delta comparisons
-- **Full Field Verification (全字段核对)**: Compare all columns in the table for complete data integrity
-- **Selective Field Verification (指定字段核对)**: Compare only specified columns for targeted verification
+- **Primary Key-based Full Data Verification**: Complete table comparison using primary keys for chunking and ordering
+- **Time Field-based Incremental Verification**: Incremental data checking based on specified timestamp columns for efficient delta comparisons
+- **Full Field Verification**: Compare all columns in the table for complete data integrity
+- **Selective Field Verification**: Compare only specified columns for targeted verification
 
 #### 2. Advanced Cross-Instance Support
-- **Multi-Table Parallel Verification (跨MySQL实例的多表并行核对)**: Supports parallel verification of multiple tables across different MySQL instances for improved performance
-- **Superset Data Scenarios (目标表的数据是源表的超集的场景)**: Handles scenarios where target table data is a superset of source table data, allowing for flexible replication validation
+- **Multi-Table Parallel Verification**: Supports parallel verification of multiple tables across different MySQL instances for improved performance
+- **Superset Data Scenarios**: Handles scenarios where target table data is a superset of source table data, allowing for flexible replication validation
 
 #### 3. Technical Implementation
-- **CRC32 Checksum Algorithm (计算并比较待核对数据的CRC32值)**: Uses CRC32 checksums to calculate and compare data integrity values, providing fast and reliable data comparison
+- **CRC32 Checksum Algorithm**: Uses CRC32 checksums to calculate and compare data integrity values, providing fast and reliable data comparison
 - **Chunk-based Processing**: Processes data in configurable chunks to handle large tables efficiently
 - **Automatic Primary Key Detection**: Intelligently selects the best unique key for data chunking and comparison
 - **Retry Mechanisms**: Built-in retry logic for handling transient network or database issues

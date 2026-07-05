@@ -115,7 +115,7 @@ func NewBaseContext() *BaseContext {
 	}
 }
 
-// SetChunkSize 设置chunksize范围：10-100000
+// SetChunkSize clamps and stores the chunk size within the allowed range 10-100000
 func (ctx *BaseContext) SetChunkSize(chunkSize int64) {
 	if chunkSize < 10 {
 		chunkSize = 10
@@ -126,7 +126,7 @@ func (ctx *BaseContext) SetChunkSize(chunkSize int64) {
 	atomic.StoreInt64(&ctx.ChunkSize, chunkSize)
 }
 
-// SetDefaultNumRetries 设置最大重试次数,默认10
+// SetDefaultNumRetries sets the maximum number of retries (default 10); non-positive values are ignored
 func (ctx *BaseContext) SetDefaultNumRetries(retries int64) {
 	ctx.throttleMutex.Lock()
 	defer ctx.throttleMutex.Unlock()
@@ -135,7 +135,7 @@ func (ctx *BaseContext) SetDefaultNumRetries(retries int64) {
 	}
 }
 
-// SetLogLevel 设置日志级别
+// SetLogLevel configures the log level and output destination
 func (ctx *BaseContext) SetLogLevel(debug bool, logFile string) {
 	ctx.Log.SetLevel(log.InfoLevel)
 	if debug {
@@ -152,7 +152,7 @@ func (ctx *BaseContext) SetLogLevel(debug bool, logFile string) {
 	}
 }
 
-// SetSpecifiedDatetimeRange 设置按时间字段核对的起止时间
+// SetSpecifiedDatetimeRange parses and validates the begin/end times for time-column checks
 func (ctx *BaseContext) SetSpecifiedDatetimeRange(specifiedTimeBegin, specifiedTimeEnd string) (err error) {
 	if specifiedTimeBegin != "" {
 		if ctx.SpecifiedDatetimeRangeBegin, err = time.ParseInLocation("2006-01-02 15:04:05", specifiedTimeBegin, time.Local); err != nil {
@@ -185,7 +185,7 @@ func (ctx *BaseContext) GetDBUri(databaseName string) (string, string) {
 	return sourceDBUri, targetDBUri
 }
 
-// InitDB 建立数据库连接
+// InitDB opens the source and target database connections
 func (ctx *BaseContext) InitDB() (err error) {
 	databaseName := "information_schema"
 	sourceDBUri, targetDBUri := ctx.GetDBUri(databaseName)
@@ -211,7 +211,7 @@ func (ctx *BaseContext) InitDB() (err error) {
 	return nil
 }
 
-// CloseDB 关闭数据库连接
+// CloseDB closes the source and target database connections
 func (ctx *BaseContext) CloseDB() {
 	ctx.TargetDB.Close()
 	ctx.SourceDB.Close()
@@ -411,7 +411,7 @@ type ColumnValues struct {
 	ValuesPointers []interface{}
 }
 
-// NewColumnValues 将abstractValues的值复制到ValuesPointers
+// NewColumnValues creates a ColumnValues whose ValuesPointers reference its abstract values, ready for sql.Rows.Scan
 func NewColumnValues(length int) *ColumnValues {
 	result := &ColumnValues{
 		abstractValues: make([]interface{}, length),
@@ -438,12 +438,10 @@ func (cv *ColumnValues) AbstractValues() []interface{} {
 	return cv.abstractValues
 }
 
-// StringColumn 返回二进制对应的ASCII字符串
+// StringColumn renders the value at the given index as text; driver byte slices are converted to strings
 func (cv *ColumnValues) StringColumn(index int) string {
 	val := cv.AbstractValues()[index]
-	// uint8 the set of all unsigned  8-bit integers (0 to 255),等同于byte
 	if ints, ok := val.([]uint8); ok {
-		// string([]uint8) 返回byte对应的字符串
 		return string(ints)
 	}
 	return fmt.Sprintf("%+v", val)

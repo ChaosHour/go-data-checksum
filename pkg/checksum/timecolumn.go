@@ -127,7 +127,7 @@ func (ctx *ChecksumContext) IterationTimeRangeQueryChecksum() (isChunkChecksumEq
 		duration = time.Since(startTime)
 	}()
 
-	// 计算CRC32XOR聚合值，还是逐行CRC32值
+	// checkLevel 1 = aggregated CRC32XOR, 2 = per-row CRC32 values
 	var checkLevel int64 = 1
 	if ctx.Context.IsSuperSetAsEqual {
 		checkLevel = 2
@@ -153,7 +153,7 @@ func (ctx *ChecksumContext) IterationTimeRangeQueryChecksum() (isChunkChecksumEq
 	return false, duration, nil
 }
 
-// queryTimeRangeChecksumFunc 获取当前时间分批的checksum结果(聚合CRC32XOR 或者 逐行CRC32)
+// queryTimeRangeChecksumFunc fetches the checksum result for the current time chunk (aggregated CRC32XOR or per-row CRC32)
 func (ctx *ChecksumContext) queryTimeRangeChecksumFunc(db *gosql.DB, databaseName, tableName string, checkLevel int64, ch chan *crc32ResultStruct) {
 	var ret []string
 	query, err := builder.BuildTimeRangeChecksumSQL(
@@ -190,7 +190,7 @@ func (ctx *ChecksumContext) queryTimeRangeChecksumFunc(db *gosql.DB, databaseNam
 	ch <- newCrc32ResultStruct(ret, nil)
 }
 
-// isOrderedSubset 判断有序集subset是否superset的子集
+// isOrderedSubset reports whether subset is contained in superset, respecting order
 func isOrderedSubset(subset []string, superset []string) bool {
 	startIndex := 0
 	for i := 0; i < len(subset); i++ {

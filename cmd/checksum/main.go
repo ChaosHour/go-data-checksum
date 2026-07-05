@@ -20,7 +20,7 @@ import (
 
 var AppVersion string
 
-// ChecksumJob 用于协程池管理
+// ChecksumJob manages the checksum worker pool
 type ChecksumJob struct {
 	ChecksumJobChan chan int
 	wg              *sync.WaitGroup
@@ -33,7 +33,7 @@ func NewChecksumJob(threads int) *ChecksumJob {
 	}
 }
 
-// GenerateTableList 生成源表和目标表对应关系
+// GenerateTableList builds the mapping between source and target tables
 func GenerateTableList(baseContext *types.BaseContext) (err error) {
 	queryWithDatabase := func(databases []string, tablesRegexp string, hint string) (tablesList []string, err error) {
 		var query string
@@ -73,7 +73,7 @@ func GenerateTableList(baseContext *types.BaseContext) (err error) {
 		return tablesList, nil
 	}
 
-	// 指定源端库表名
+	// Source databases and tables given explicitly
 	if baseContext.SourceDatabases != "" && baseContext.SourceTables != "" {
 		baseContext.SourceDatabaseList = strings.Split(baseContext.SourceDatabases, ",")
 		baseContext.SourceTableList = strings.Split(baseContext.SourceTables, ",")
@@ -83,11 +83,11 @@ func GenerateTableList(baseContext *types.BaseContext) (err error) {
 			}
 		}
 	} else if baseContext.SourceDatabases != "" && baseContext.SourceTables == "" {
-		// 指定源库的所有表
+		// All tables of the specified source databases
 		baseContext.SourceDatabaseList = strings.Split(baseContext.SourceDatabases, ",")
 		baseContext.TableQueryHint = "QueryTableNameWithDatabase"
 	} else if baseContext.SourceTableNameRegexp != "" {
-		// 源表正则匹配
+		// Source tables matched by regular expression
 		baseContext.TableQueryHint = "QueryTableNameWithRegexp"
 	} else {
 		return fmt.Errorf("no source tables specified: use --source-db-name (with optional --source-table-name) or --source-table-regexp")
@@ -104,7 +104,7 @@ func GenerateTableList(baseContext *types.BaseContext) (err error) {
 
 	baseContext.PairOfSourceAndTargetTables = make(map[string]string, len(baseContext.SourceTableFullNameList))
 	if baseContext.TargetDatabases != "" && baseContext.TargetTables != "" {
-		// 指定目标库表
+		// Target databases and tables given explicitly
 		baseContext.TargetDatabaseList = strings.Split(baseContext.TargetDatabases, ",")
 		baseContext.TargetTableList = strings.Split(baseContext.TargetTables, ",")
 		for _, databaseName := range baseContext.TargetDatabaseList {
@@ -120,7 +120,7 @@ func GenerateTableList(baseContext *types.BaseContext) (err error) {
 			baseContext.PairOfSourceAndTargetTables[tableName] = baseContext.TargetTableFullNameList[i]
 		}
 	} else if baseContext.TargetDatabaseAddSuffix != "" && baseContext.TargetTableAddSuffix != "" {
-		// 目标库表名加后缀
+		// Suffix both the target database and table names
 		for _, tableName := range baseContext.SourceTableFullNameList {
 			sourceDatabaseName := strings.Split(tableName, ".")[0]
 			sourceTableName := strings.Split(tableName, ".")[1]
@@ -128,7 +128,7 @@ func GenerateTableList(baseContext *types.BaseContext) (err error) {
 			baseContext.PairOfSourceAndTargetTables[tableName] = targetTableName
 		}
 	} else if baseContext.TargetDatabaseAsSource && baseContext.TargetTableAddSuffix != "" {
-		// 目标库名相同，表名加后缀
+		// Same database name, suffixed table name
 		for _, tableName := range baseContext.SourceTableFullNameList {
 			sourceDatabaseName := strings.Split(tableName, ".")[0]
 			sourceTableName := strings.Split(tableName, ".")[1]
@@ -136,7 +136,7 @@ func GenerateTableList(baseContext *types.BaseContext) (err error) {
 			baseContext.PairOfSourceAndTargetTables[tableName] = targetTableName
 		}
 	} else if baseContext.TargetDatabaseAddSuffix != "" && baseContext.TargetTableAsSource {
-		// 目标库名加后缀，表名相同
+		// Suffixed database name, same table name
 		for _, tableName := range baseContext.SourceTableFullNameList {
 			sourceDatabaseName := strings.Split(tableName, ".")[0]
 			sourceTableName := strings.Split(tableName, ".")[1]
@@ -144,7 +144,7 @@ func GenerateTableList(baseContext *types.BaseContext) (err error) {
 			baseContext.PairOfSourceAndTargetTables[tableName] = targetTableName
 		}
 	} else if baseContext.TargetDatabaseAsSource && baseContext.TargetTableAsSource {
-		// 目标库表名与源库表一致
+		// Target database and table names identical to the source
 		for _, tableName := range baseContext.SourceTableFullNameList {
 			targetTableName := tableName
 			baseContext.PairOfSourceAndTargetTables[tableName] = targetTableName
@@ -158,7 +158,7 @@ func GenerateTableList(baseContext *types.BaseContext) (err error) {
 	return nil
 }
 
-// runDifferentialAnalysis 运行记录级差异分析，必要时先解析核对字段和唯一键
+// runDifferentialAnalysis runs the record-level difference analysis, resolving check columns and the unique key first when needed
 func runDifferentialAnalysis(baseContext *types.BaseContext, checksumContext *checksum.ChecksumContext) {
 	baseContext.Log.Infof("Running differential analysis for table pair: %s.%s => %s.%s", checksumContext.PerTableContext.SourceDatabaseName, checksumContext.PerTableContext.SourceTableName, checksumContext.PerTableContext.TargetDatabaseName, checksumContext.PerTableContext.TargetTableName)
 	if checksumContext.CheckColumns == nil {
@@ -179,8 +179,8 @@ func runDifferentialAnalysis(baseContext *types.BaseContext, checksumContext *ch
 	}
 }
 
-// ChecksumPerTable 先判断总记录数，然后逐个分片判断checksum值.
-// 返回该表是否核对一致；每个表只返回一次结果，由调用方负责写入结果通道。
+// ChecksumPerTable first compares total row counts, then verifies chunk checksums one by one.
+// Returns whether the table pair is equal; each table returns exactly one result, which the caller writes to the result channels.
 func (job *ChecksumJob) ChecksumPerTable(baseContext *types.BaseContext, tableContext *types.TableContext) (isEqual bool, err error) {
 	startTime := time.Now()
 	var tableCheckDuration time.Duration
@@ -192,7 +192,7 @@ func (job *ChecksumJob) ChecksumPerTable(baseContext *types.BaseContext, tableCo
 	ChecksumContext := checksum.NewChecksumContext(baseContext, tableContext)
 	baseContext.Log.Infof("Starting check table pair: %s.%s => %s.%s .", ChecksumContext.PerTableContext.SourceDatabaseName, ChecksumContext.PerTableContext.SourceTableName, ChecksumContext.PerTableContext.TargetDatabaseName, ChecksumContext.PerTableContext.TargetTableName)
 
-	// 先核对全表count(*)值是否一致
+	// First verify the full-table count(*) values match
 	if !baseContext.IgnoreRowCountCheck {
 		baseContext.Log.Debugf("DataChecksumByCount of table pair: %s.%s => %s.%s .", ChecksumContext.PerTableContext.SourceDatabaseName, ChecksumContext.PerTableContext.SourceTableName, ChecksumContext.PerTableContext.TargetDatabaseName, ChecksumContext.PerTableContext.TargetTableName)
 		_, isMoreCheckNeeded, err := ChecksumContext.DataChecksumByCount()
@@ -200,7 +200,7 @@ func (job *ChecksumJob) ChecksumPerTable(baseContext *types.BaseContext, tableCo
 			return false, err
 		}
 		if !isMoreCheckNeeded {
-			// 行数不一致：如果开启了差异报告，仍然进行记录级分析
+			// Row counts differ: still run record-level analysis when differential reporting is enabled
 			if baseContext.EnableDifferentialReporting {
 				runDifferentialAnalysis(baseContext, ChecksumContext)
 			}
@@ -210,7 +210,7 @@ func (job *ChecksumJob) ChecksumPerTable(baseContext *types.BaseContext, tableCo
 		baseContext.Log.Debugf("Ignore DataChecksumByCount of table pair: %s.%s => %s.%s due to IgnoreRowCountCheck=true.", ChecksumContext.PerTableContext.SourceDatabaseName, ChecksumContext.PerTableContext.SourceTableName, ChecksumContext.PerTableContext.TargetDatabaseName, ChecksumContext.PerTableContext.TargetTableName)
 	}
 
-	// 判断用户有没有输入checkcolumn，没有则取全表所有字段作为核对字段
+	// Use the user-requested check columns, defaulting to all columns of the table
 	baseContext.Log.Debugf("Get user-request check columns of table pair: %s.%s => %s.%s .", ChecksumContext.PerTableContext.SourceDatabaseName, ChecksumContext.PerTableContext.SourceTableName, ChecksumContext.PerTableContext.TargetDatabaseName, ChecksumContext.PerTableContext.TargetTableName)
 	if ChecksumContext.CheckColumns == nil {
 		if err := ChecksumContext.GetCheckColumns(); err != nil {
@@ -218,7 +218,7 @@ func (job *ChecksumJob) ChecksumPerTable(baseContext *types.BaseContext, tableCo
 		}
 	}
 
-	// 获取唯一键、最大最小值
+	// Resolve the unique key and its min/max values
 	baseContext.Log.Debugf("GetUniqueKeys of table pair: %s.%s => %s.%s .", ChecksumContext.PerTableContext.SourceDatabaseName, ChecksumContext.PerTableContext.SourceTableName, ChecksumContext.PerTableContext.TargetDatabaseName, ChecksumContext.PerTableContext.TargetTableName)
 	if err := ChecksumContext.GetUniqueKeys(); err != nil {
 		return false, err
@@ -232,7 +232,7 @@ func (job *ChecksumJob) ChecksumPerTable(baseContext *types.BaseContext, tableCo
 		return false, err
 	}
 
-	// 计算checksum值
+	// Compute chunk checksums
 	var hasFurtherRange = true
 	for hasFurtherRange {
 		hasFurtherRange, err = ChecksumContext.CalculateNextIterationRangeEndValues()
@@ -244,7 +244,7 @@ func (job *ChecksumJob) ChecksumPerTable(baseContext *types.BaseContext, tableCo
 		var isChunkChecksumEqual bool
 		var duration time.Duration
 		if hasFurtherRange {
-			// 增加重试机制
+			// Retry to ride out transient errors and replication lag
 			for i := 0; i < int(ChecksumContext.Context.DefaultNumRetries); i++ {
 				if i != 0 {
 					time.Sleep(1 * time.Second)
@@ -290,8 +290,8 @@ func (job *ChecksumJob) ChecksumPerTable(baseContext *types.BaseContext, tableCo
 	return true, nil
 }
 
-// ChecksumPerTableViaTimeColumn 使用指定的时间字段增量核对.
-// 返回该表是否核对一致；每个表只返回一次结果，由调用方负责写入结果通道。
+// ChecksumPerTableViaTimeColumn checks incrementally using the specified time column.
+// Returns whether the table pair is equal; each table returns exactly one result, which the caller writes to the result channels.
 func (job *ChecksumJob) ChecksumPerTableViaTimeColumn(baseContext *types.BaseContext, tableContext *types.TableContext) (isEqual bool, err error) {
 	startTime := time.Now()
 	var tableCheckDuration time.Duration
@@ -303,7 +303,7 @@ func (job *ChecksumJob) ChecksumPerTableViaTimeColumn(baseContext *types.BaseCon
 	ChecksumContext := checksum.NewChecksumContext(baseContext, tableContext)
 	baseContext.Log.Infof("Starting check table pair: %s.%s => %s.%s .", ChecksumContext.PerTableContext.SourceDatabaseName, ChecksumContext.PerTableContext.SourceTableName, ChecksumContext.PerTableContext.TargetDatabaseName, ChecksumContext.PerTableContext.TargetTableName)
 
-	// 判断用户有没有输入checkcolumn，没有则取全表所有字段作为核对字段
+	// Use the user-requested check columns, defaulting to all columns of the table
 	baseContext.Log.Debugf("Get user-request check columns of table pair: %s.%s => %s.%s .", ChecksumContext.PerTableContext.SourceDatabaseName, ChecksumContext.PerTableContext.SourceTableName, ChecksumContext.PerTableContext.TargetDatabaseName, ChecksumContext.PerTableContext.TargetTableName)
 	if ChecksumContext.CheckColumns == nil {
 		if err := ChecksumContext.GetCheckColumns(); err != nil {
@@ -311,20 +311,20 @@ func (job *ChecksumJob) ChecksumPerTableViaTimeColumn(baseContext *types.BaseCon
 		}
 	}
 
-	// 获取时间列、最大最小值
+	// Resolve the time column
 	baseContext.Log.Debugf("GetTimeColumn of table pair: %s.%s => %s.%s.", ChecksumContext.PerTableContext.SourceDatabaseName, ChecksumContext.PerTableContext.SourceTableName, ChecksumContext.PerTableContext.TargetDatabaseName, ChecksumContext.PerTableContext.TargetTableName)
 	if err := ChecksumContext.GetTimeColumn(); err != nil {
 		return false, err
 	}
 	baseContext.Log.Debugf("Time column values range [%s-%s] of table pair: %s.%s => %s.%s .", ChecksumContext.Context.SpecifiedDatetimeRangeBegin, ChecksumContext.Context.SpecifiedDatetimeRangeEnd, ChecksumContext.PerTableContext.SourceDatabaseName, ChecksumContext.PerTableContext.SourceTableName, ChecksumContext.PerTableContext.TargetDatabaseName, ChecksumContext.PerTableContext.TargetTableName)
 
-	// 获取满足TimeRange核对条件的估算行数
+	// Estimate the number of rows within the time range
 	estimatedRows, err := ChecksumContext.EstimateTableRowsViaExplain()
 	if err != nil {
 		return false, err
 	}
 
-	// 计算checksum值
+	// Compute chunk checksums
 	var hasFurtherRange = true
 	for hasFurtherRange {
 		hasFurtherRange, err = ChecksumContext.CalculateNextIterationTimeRange()
@@ -336,7 +336,7 @@ func (job *ChecksumJob) ChecksumPerTableViaTimeColumn(baseContext *types.BaseCon
 		var isChunkChecksumEqual bool
 		var duration time.Duration
 		if hasFurtherRange {
-			// 增加重试机制
+			// Retry to ride out transient errors and replication lag
 			for i := 0; i < int(ChecksumContext.Context.DefaultNumRetries); i++ {
 				if i != 0 {
 					time.Sleep(1 * time.Second)
@@ -383,16 +383,16 @@ func (job *ChecksumJob) ChecksumPerTableViaTimeColumn(baseContext *types.BaseCon
 	return true, nil
 }
 
-// 核对任务
+// checksum runs the check across all table pairs
 func (job *ChecksumJob) checksum(baseContext *types.BaseContext) {
-	// 获取源表和目标表
+	// Build the source and target table pairs
 	if err := GenerateTableList(baseContext); err != nil {
 		baseContext.Log.Errorf("Generating source and target tables failed, %s", err.Error())
 		baseContext.PanicAbort <- err
 		return
 	}
 
-	// 逐个表进行核对, 按顺序去除map的元素
+	// Check tables one by one, iterating the map keys in sorted order
 	tableNum := len(baseContext.PairOfSourceAndTargetTables)
 	tableResultEqualNum := 0
 	baseContext.ChecksumResChan = make(chan bool, tableNum)
@@ -419,7 +419,7 @@ func (job *ChecksumJob) checksum(baseContext *types.BaseContext) {
 
 		job.ChecksumJobChan <- 1
 		job.wg.Add(1)
-		// 使用主键/时间字段核对。每个表只向结果通道写入一次 (result, error)。
+		// Check via primary key or time column. Each table writes exactly one (result, error) pair to the channels.
 		go func() {
 			var isEqual bool
 			var err error
@@ -524,13 +524,13 @@ func main() {
 		baseContext.CloseDB()
 		baseContext.Log.Infof("Finished go-data-checksum. TotalDuration=%+v", time.Since(startTime))
 	}()
-	// 初始化源和目标库连接
+	// Initialize the source and target database connections
 	baseContext.Log.Infof("Starting go-data-checksum %+v...", AppVersion)
 	if err := baseContext.InitDB(); err != nil {
 		baseContext.Log.Fatalf("DB connection initiate failed: %v", err)
 	}
 
-	// 核对任务
+	// Run the check job
 	ChecksumJob := NewChecksumJob(baseContext.ParallelThreads)
 	ChecksumJob.checksum(baseContext)
 

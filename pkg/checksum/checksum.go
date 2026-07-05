@@ -69,17 +69,17 @@ func NewChecksumContext(context *types.BaseContext, perTableContext *types.Table
 	}
 }
 
-// GetIteration 获取当前核对批次
+// GetIteration returns the current check iteration
 func (ctx *ChecksumContext) GetIteration() int64 {
 	return atomic.LoadInt64(&ctx.PerTableContext.Iteration)
 }
 
-// AddIteration 核对批次累加
+// AddIteration increments the check iteration counter
 func (ctx *ChecksumContext) AddIteration() {
 	atomic.AddInt64(&ctx.PerTableContext.Iteration, 1)
 }
 
-// GetChunkSize 获取chunk大小
+// GetChunkSize returns the configured chunk size
 func (ctx *ChecksumContext) GetChunkSize() int64 {
 	return atomic.LoadInt64(&ctx.Context.ChunkSize)
 }
@@ -91,8 +91,8 @@ func (ctx *ChecksumContext) GetCheckColumns() (err error) {
 		return nil
 	}
 
-	// GROUP_CONCAT()函数默认只能返回1024字节，如果表字段过多可能超过这个限制，需要先设置会话级参数 SET SESSION group_concat_max_len = 10240;
-	// GO的MySQL驱动不能保证前后两个查询是在同一个session，除非使用transaction。
+	// GROUP_CONCAT() returns at most 1024 bytes by default, which wide tables can exceed, so raise group_concat_max_len for the session first.
+	// The Go MySQL driver does not guarantee consecutive queries run on the same session unless a transaction is used.
 	query := `
     select 
       GROUP_CONCAT(COLUMN_NAME ORDER BY ORDINAL_POSITION ASC) AS COLUMN_NAMES
@@ -236,7 +236,6 @@ func (ctx *ChecksumContext) GetUniqueKeys() (err error) {
 
 // ReadUniqueKeyRangeMinValues returns the minimum values to be iterated on checksum
 func (ctx *ChecksumContext) ReadUniqueKeyRangeMinValues() (err error) {
-	// 构造获取唯一键最小值的SQL
 	query, err := builder.BuildUniqueKeyMinValuesPreparedQuery(ctx.PerTableContext.SourceDatabaseName, ctx.PerTableContext.SourceTableName, ctx.UniqueKey)
 	if err != nil {
 		return err
@@ -247,10 +246,8 @@ func (ctx *ChecksumContext) ReadUniqueKeyRangeMinValues() (err error) {
 	}
 	defer rows.Close() // Add this to prevent connection leaks
 
-	// UniqueKeyRangeMinValues 为 ColumnValues结构体
 	ctx.UniqueKeyRangeMinValues = types.NewColumnValues(ctx.UniqueKey.Len())
 	for rows.Next() {
-		// SQL查询结构赋值给UniqueKeyRangeMinValues
 		if err = rows.Scan(ctx.UniqueKeyRangeMinValues.ValuesPointers...); err != nil {
 			return err
 		}
@@ -261,7 +258,6 @@ func (ctx *ChecksumContext) ReadUniqueKeyRangeMinValues() (err error) {
 
 // ReadUniqueKeyRangeMaxValues returns the maximum values to be iterated on checksum
 func (ctx *ChecksumContext) ReadUniqueKeyRangeMaxValues() (err error) {
-	// 构造获取唯一键最小值的SQL
 	query, err := builder.BuildUniqueKeyMaxValuesPreparedQuery(ctx.PerTableContext.SourceDatabaseName, ctx.PerTableContext.SourceTableName, ctx.UniqueKey)
 	if err != nil {
 		return err
@@ -272,10 +268,8 @@ func (ctx *ChecksumContext) ReadUniqueKeyRangeMaxValues() (err error) {
 	}
 	defer rows.Close() // Add this to prevent connection leaks
 
-	// UniqueKeyRangeMinValues 为 ColumnValues结构体
 	ctx.UniqueKeyRangeMaxValues = types.NewColumnValues(ctx.UniqueKey.Len())
 	for rows.Next() {
-		// SQL查询结构赋值给UniqueKeyRangeMinValues
 		if err = rows.Scan(ctx.UniqueKeyRangeMaxValues.ValuesPointers...); err != nil {
 			return err
 		}
@@ -284,20 +278,18 @@ func (ctx *ChecksumContext) ReadUniqueKeyRangeMaxValues() (err error) {
 	return rows.Err() // Properly check for errors after scanning
 }
 
-// CalculateNextIterationRangeEndValues 计算下一批次核对的起始值
+// CalculateNextIterationRangeEndValues computes the unique-key range for the next check iteration
 func (ctx *ChecksumContext) CalculateNextIterationRangeEndValues() (hasFurtherRange bool, err error) {
 	ctx.ChecksumIterationRangeMinValues = ctx.ChecksumIterationRangeMaxValues
 	if ctx.ChecksumIterationRangeMinValues == nil {
 		ctx.ChecksumIterationRangeMinValues = ctx.UniqueKeyRangeMinValues
 	}
 
-	// 正常使用BuildUniqueKeyRangeEndPreparedQueryViaOffset返回最大值
-	// 最后一批时使用BuildUniqueKeyRangeEndPreparedQueryViaOffset返回值为空，进入第二次循环，通过BuildUniqueKeyRangeEndPreparedQueryViaTemptable查询最大值
+	// Normally BuildUniqueKeyRangeEndPreparedQueryViaOffset returns the chunk upper bound.
+	// On the final chunk it returns no rows, so the second pass queries the max values via BuildUniqueKeyRangeEndPreparedQueryViaTemptable.
 	for i := 0; i < 2; i++ {
-		// 构造分批范围的分批下限值查询SQL
 		buildFunc := builder.BuildUniqueKeyRangeEndPreparedQueryViaOffset
 		if i == 1 {
-			// BuildUniqueKeyRangeEndPreparedQueryViaTemptable 构造分批范围的分批下限值查询SQL，与BuildUniqueKeyRangeEndPreparedQueryViaOffset稍有差异
 			buildFunc = builder.BuildUniqueKeyRangeEndPreparedQueryViaTemptable
 		}
 		query, explodedArgs, err := buildFunc(
@@ -314,20 +306,16 @@ func (ctx *ChecksumContext) CalculateNextIterationRangeEndValues() (hasFurtherRa
 		if err != nil {
 			return hasFurtherRange, err
 		}
-		// 实际执行查询
 		rows, err := ctx.Context.SourceDB.Query(query, explodedArgs...)
 		if err != nil {
 			return hasFurtherRange, err
 		}
 		defer rows.Close() // Add this to prevent connection leaks
 
-		// NewColumnValues 将ColumnValues结构体的abstractValues的值复制到ValuesPointers
 		iterationRangeMaxValues := types.NewColumnValues(ctx.UniqueKey.Len())
-		// rows.Next() 遍历读取结果期，使用rows.Scan()将结果集存到变量。
-		// 结果集(rows)未关闭前，底层的连接处于繁忙状态。当遍历读到最后一条记录时，会发生一个内部EOF错误，自动调用rows.Close()。
-		// 但是如果提前退出循环，rows不会关闭，连接不会回到连接池中，连接也不会关闭。所以手动关闭非常重要。rows.Close()可以多次调用，是无害操作。
+		// While the result set is open the underlying connection stays busy. Reading past the last row closes it automatically,
+		// but leaving the loop early would leak the connection, so the explicit Close matters (Close is safe to call more than once).
 		for rows.Next() {
-			// Scan()函数将查询结果赋值给iterationRangeMaxValues.ValuesPointers...
 			if err = rows.Scan(iterationRangeMaxValues.ValuesPointers...); err != nil {
 				return hasFurtherRange, err
 			}
@@ -336,7 +324,7 @@ func (ctx *ChecksumContext) CalculateNextIterationRangeEndValues() (hasFurtherRa
 		if err = rows.Err(); err != nil {
 			return hasFurtherRange, err
 		}
-		// 如果还有下一批次结果，将当前查询结果赋值给context的 MigrationIterationRangeMaxValues
+		// If there is a further chunk, store its upper bound in the context
 		if hasFurtherRange {
 			ctx.ChecksumIterationRangeMaxValues = iterationRangeMaxValues
 			return hasFurtherRange, nil
@@ -347,15 +335,15 @@ func (ctx *ChecksumContext) CalculateNextIterationRangeEndValues() (hasFurtherRa
 }
 
 // IterationQueryChecksum issues a chunk-Checksum query on the table.
-// 1. 批次核对：单个批次内聚合结果CRC32值按位异或结果，计算方式：COALESCE(LOWER(CONV(BIT_XOR(cast(crc32(CONCAT_WS('#',C1,C2,C3,Cn)) as UNSIGNED)), 10, 16)), 0)
-// 2. 记录级核对：单个批次内每条记录的CRC32值，判断源端的CRC32是不是目标端的CRC32的子集，计算方式: COALESCE(LOWER(CONV(cast(crc32(CONCAT_WS('#',id, ftime, c1, c2)) as UNSIGNED), 10, 16)), 0)
+// 1. Chunk-level check: XOR-aggregated CRC32 of the rows in the chunk: COALESCE(LOWER(CONV(BIT_XOR(cast(crc32(CONCAT_WS('#',C1,C2,C3,Cn)) as UNSIGNED)), 10, 16)), 0)
+// 2. Row-level check: per-row CRC32 values in the chunk, used to test whether the source rows are a subset of the target rows: COALESCE(LOWER(CONV(cast(crc32(CONCAT_WS('#',id, ftime, c1, c2)) as UNSIGNED), 10, 16)), 0)
 func (ctx *ChecksumContext) IterationQueryChecksum() (isChunkChecksumEqual bool, duration time.Duration, err error) {
 	startTime := time.Now()
 	defer func() {
 		duration = time.Since(startTime)
 	}()
 
-	// 计算CRC32XOR聚合值，还是逐行CRC32值
+	// checkLevel 1 = aggregated CRC32XOR, 2 = per-row CRC32 values
 	var checkLevel int64 = 1
 	if ctx.Context.IsSuperSetAsEqual {
 		checkLevel = 2
@@ -379,13 +367,13 @@ func (ctx *ChecksumContext) IterationQueryChecksum() (isChunkChecksumEqual bool,
 	if reflect.DeepEqual(sourceResult, targetResult) {
 		return true, duration, nil
 	} else if checkLevel == 2 {
-		// 判断有序集subset是否superset的子集,这里可以沿用类似归档排序方式,主要由于主键是可以保证顺序一样
+		// The ordered-subset check works because the unique-key ordering guarantees both sides sort identically
 		return isOrderedSubset(sourceResult, targetResult), duration, nil
 	}
 	return false, duration, nil
 }
 
-// QueryChecksumFunc 获取ChunkChecksum结果(聚合CRC32XOR 或者 逐行CRC32)
+// QueryChecksumFunc fetches the chunk checksum result (aggregated CRC32XOR or per-row CRC32)
 func (ctx *ChecksumContext) QueryChecksumFunc(db *gosql.DB, databaseName, tableName string, uniqueColumn *types.ColumnList, checkLevel int64, ch chan *crc32ResultStruct) {
 	var ret []string
 	query, explodedArgs, err := builder.BuildRangeChecksumPreparedQuery(
@@ -424,7 +412,7 @@ func (ctx *ChecksumContext) QueryChecksumFunc(db *gosql.DB, databaseName, tableN
 	ch <- newCrc32ResultStruct(ret, nil)
 }
 
-// DataChecksumByCount 比较源表和目标表的总记录数，如果IsSuperSetAsEqual为false则只有记录数相等才认为核平，否则源表记录数少于等于目标表则认为核平，返回是否核平以及是否需要继续核对
+// DataChecksumByCount compares the total row counts of the source and target tables. With IsSuperSetAsEqual=false only equal counts pass; otherwise source <= target also passes. Returns whether the counts match and whether further checking is needed.
 func (ctx *ChecksumContext) DataChecksumByCount() (isTableCountEqual bool, isMoreCheckNeeded bool, err error) {
 	SourceQueryTableCount := fmt.Sprintf("select /* dataChecksum */ count(*) from %s.%s", types.EscapeName(ctx.PerTableContext.SourceDatabaseName), types.EscapeName(ctx.PerTableContext.SourceTableName))
 	TargetQueryTableCount := fmt.Sprintf("select /* dataChecksum */ count(*) from %s.%s", types.EscapeName(ctx.PerTableContext.TargetDatabaseName), types.EscapeName(ctx.PerTableContext.TargetTableName))
