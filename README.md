@@ -27,12 +27,14 @@ The tool automatically detects and uses the best unique key for data chunking:
 
 ## BUILD
 ```
-go build -o bin/go-data-checksum cmd/checksum/main.go
+make build     # builds bin/go-data-checksum and bin/go-data-sync
+make test      # runs the unit tests
 ```
 
-Or use the Makefile:
+Or build the binaries directly:
 ```
-make build
+go build -o bin/go-data-checksum cmd/checksum/main.go
+go build -o bin/go-data-sync cmd/sync/main.go
 ```
 
 ## USAGE
@@ -45,7 +47,7 @@ make build
   -chunk-size int
         amount of rows to handle in each iteration (allowed range: 10-100,000) (default 1000)
   -conn-db-timeout int
-        connect db timeout (default 30)
+        connect db timeout (default 60)
   -debug
         debug mode (very verbose)
   -default-retries int
@@ -110,86 +112,133 @@ make build
         Parallel threads of table checksum. (default 1)
   -time-range-per-step duration
         time range per step for specified time column check,default 5m,eg:1h/2m/3s/4ms (default 5m0s)
+  -version
+        Print version & exit
 ```
 
 ## EXAMPLES
 
-### 1. Your Original Use Case Enhanced with Differential Reporting
+### 1. Quick start: compare one database between two instances
 ```bash
-# Compare all tables in a specific database with detailed difference reporting
+# Checks every table in app_db on the source against the same-named tables
+# on the target. Fails fast per table on a row-count mismatch, then verifies
+# contents chunk by chunk with CRC32.
 ./bin/go-data-checksum \
-  --source-db-host=dev-sandbox.com \
-  --source-db-port=3306 \
-  --source-db-user=flyway \
-  --source-db-password="xxxx" \
-  --target-db-host=dev-sandbox.com \
-  --target-db-port=3306 \
-  --target-db-user=flyway \
-  --target-db-password="xxxx" \
-  --source-db-name="dba" \
-  --ignore-row-count-check \
-  --is-superset-as-equal \
+  --source-db-host="prod.example.com"    --source-db-port=3306 \
+  --source-db-user="checker"             --source-db-password="xxxx" \
+  --target-db-host="replica.example.com" --target-db-port=3306 \
+  --target-db-user="checker"             --target-db-password="xxxx" \
+  --source-db-name="app_db" \
+  --threads=4
+```
+Exit summary: `All N pairs of tables check result is equal.` or
+`Table records check result X equal, Y not equal.`
+
+### 2. Verify a replica and see exactly which records drifted
+```bash
+# --enable-differential-reporting rescans any unequal table and reports
+# per-record differences by primary key:
+#   -  record exists only on the SOURCE   (missing on the replica)
+#   +  record exists only on the TARGET   (extra on the replica)
+#   ~  record exists on both but differs  (modified on the replica)
+./bin/go-data-checksum \
+  --source-db-host="192.168.50.75" --source-db-port=3306 \
+  --source-db-user="root"          --source-db-password="xxxx" \
+  --target-db-host="192.168.50.75" --target-db-port=3307 \
+  --target-db-user="root"          --target-db-password="xxxx" \
+  --source-db-name="sbtest" \
   --enable-differential-reporting \
+  --max-display-differences=25 \
+  --logfile="comparison.log"
+```
+
+### 3. Full repair workflow: find, review, sync, re-verify
+```bash
+# Step 1 — find differences and write REPLACE INTO statements to a file.
+# Raise --max-sample-differences to cover every difference; the tool warns
+# (in the log and inside the file) if the file is incomplete.
+./bin/go-data-checksum \
+  --source-db-host="prod.example.com"    --source-db-user="checker" --source-db-password="xxxx" \
+  --target-db-host="replica.example.com" --target-db-user="checker" --target-db-password="xxxx" \
+  --source-db-name="app_db" \
+  --source-table-name="orders" \
+  --enable-differential-reporting \
+  --generate-sync-sql \
+  --sync-sql-file="sync_orders.sql" \
+  --max-sample-differences=10000
+
+# Step 2 — review what would be applied (go-data-sync is dry-run by default)
+./bin/go-data-sync --sql-file="sync_orders.sql" \
+  --target-db-host="replica.example.com" --target-db-user="admin" --target-db-password="xxxx"
+
+# Step 3 — apply in transactional batches
+./bin/go-data-sync --sql-file="sync_orders.sql" \
+  --target-db-host="replica.example.com" --target-db-user="admin" --target-db-password="xxxx" \
+  --execute
+
+# Step 4 — re-verify: the table pair should now report equal
+./bin/go-data-checksum \
+  --source-db-host="prod.example.com"    --source-db-user="checker" --source-db-password="xxxx" \
+  --target-db-host="replica.example.com" --target-db-user="checker" --target-db-password="xxxx" \
+  --source-db-name="app_db" --source-table-name="orders" \
+  --enable-differential-reporting
+```
+Note: target-only records (`+`) are *never* included in sync SQL — removing
+rows from the target requires a manual, reviewed DELETE.
+
+### 4. Select tables by regular expression
+```bash
+# Check every table matching sbtest.sbtest* across instances
+./bin/go-data-checksum \
+  --source-db-host="1.1.1.1" --source-db-port=3307 --source-db-user="test" --source-db-password="xxxx" \
+  --target-db-host="8.8.8.8" --target-db-port=3306 --target-db-user="test" --target-db-password="xxxx" \
+  --source-table-regexp="sbtest\.sbtest.*" \
   --threads=4
 ```
 
-### 2. Single Table Detailed Analysis
+### 5. Incremental check on a time column (large tables)
 ```bash
-# Get detailed differences for a specific table
+# Only verify rows whose updated_at falls inside the window, walking it in
+# 30-minute steps. Ideal for hourly/daily incremental verification jobs
+# where a full-table pass is too expensive.
 ./bin/go-data-checksum \
-  --source-db-host="source.example.com" \
-  --source-db-port=3306 \
-  --source-db-user="user" \
-  --source-db-password="pass" \
-  --target-db-host="target.example.com" \
-  --target-db-port=3306 \
-  --target-db-user="user" \
-  --target-db-password="pass" \
+  --source-db-host="prod.example.com"    --source-db-user="checker" --source-db-password="xxxx" \
+  --target-db-host="replica.example.com" --target-db-user="checker" --target-db-password="xxxx" \
   --source-db-name="app_db" \
-  --source-table-name="users" \
-  --enable-differential-reporting \
-  --debug \
-  --threads=1
+  --source-table-name="events" \
+  --specified-time-column="updated_at" \
+  --specified-time-begin="2026-07-04 00:00:00" \
+  --specified-time-end="2026-07-05 00:00:00" \
+  --time-range-per-step=30m \
+  --enable-differential-reporting
 ```
 
-### 3. Generate Sync SQL for Data Synchronization (NEW!)
+### 6. Compare differently-named targets (migration / shadow tables)
 ```bash
-# Generate REPLACE INTO statements to synchronize differences
+# Source app_db.users vs target app_db_new.users_v2 — explicit mapping
 ./bin/go-data-checksum \
-  --source-db-host="source.example.com" \
-  --source-db-port=3306 \
-  --source-db-user="user" \
-  --source-db-password="pass" \
-  --target-db-host="target.example.com" \
-  --target-db-port=3306 \
-  --target-db-user="user" \
-  --target-db-password="pass" \
-  --source-db-name="app_db" \
-  --source-table-name="users" \
-  --enable-differential-reporting \
-  --generate-sync-sql \
-  --sync-sql-file="sync_users.sql" \
-  --max-sample-differences=1000 \
-  --threads=1
+  ... connection flags ... \
+  --source-db-name="app_db"      --source-table-name="users" \
+  --target-db-name="app_db_new"  --target-table-name="users_v2"
 
-# Apply the generated SQL to synchronize the target
-mysql -h target.example.com -u user -p target_db < sync_users.sql
+# Or by suffix: app_db.users vs app_db.users_new for every source table
+./bin/go-data-checksum \
+  ... connection flags ... \
+  --source-db-name="app_db" \
+  --target-table-add-suffix="_new"
 ```
 
-### 4. Output Sync SQL to stdout
+### 7. Check only specific columns / tolerate a superset target
 ```bash
-# Generate sync SQL to stdout for piping
+# Compare only the business columns (skip audit/metadata columns), and
+# accept the target having extra rows (e.g. target keeps soft-deleted rows).
+# Note: sync SQL still always writes FULL rows, regardless of this flag.
 ./bin/go-data-checksum \
-  --source-db-host="source.example.com" \
-  --source-db-user="user" \
-  --source-db-password="pass" \
-  --target-db-host="target.example.com" \
-  --target-db-user="user" \
-  --target-db-password="pass" \
-  --source-db-name="app_db" \
-  --source-table-name="users" \
-  --enable-differential-reporting \
-  --generate-sync-sql | tee sync.sql
+  ... connection flags ... \
+  --source-db-name="app_db" --source-table-name="accounts" \
+  --check-column-names="id,email,balance,status" \
+  --is-superset-as-equal \
+  --ignore-row-count-check
 ```
 
 ## UNDERSTANDING DIFFERENTIAL OUTPUT
@@ -212,6 +261,13 @@ Table Pair: dba.users => dba.users
 ~ Record (id=111, tenant_id=789) modified: source_checksum=xyz789, target_checksum=qwe456
 === END DIFFERENTIAL ANALYSIS ===
 ```
+
+Notes:
+- The differential analysis always rescans the whole table pair, so the counts
+  cover every record — including target-only records whose keys fall outside
+  the source table's key range.
+- The analysis runs whenever a table pair is found unequal, including when the
+  row-count pre-check already shows a mismatch.
 
 ### Explanation of Symbols
 - **`-` (minus)**: Records that exist in the source database but are missing in the target
@@ -258,62 +314,34 @@ REPLACE INTO `target_db`.`users` (`id`, `name`, `email`, `created_at`) VALUES (7
 
 ### Safety Features
 
-1. **SQL Escaping**: Single quotes are properly escaped (`'` → `''`)
+1. **SQL Escaping**: Single quotes, backslashes, and control characters are
+   properly escaped (`'` → `''`, `\` → `\\`, newlines → `\n`)
 2. **NULL Handling**: NULL values are written as `NULL` (not quoted)
-3. **Type Safety**: Proper quoting for strings, no quotes for numbers
-4. **Atomic Operations**: REPLACE INTO is atomic within InnoDB
-5. **Sample Limits**: Use `--max-sample-differences` to control statement count
+3. **Datetime Handling**: DATETIME/TIMESTAMP values are written as proper MySQL
+   literals (`'2026-01-05 14:00:00'`)
+4. **Full-Row Statements**: sync SQL always covers *every* column of the table,
+   even when `--check-column-names` restricted the checksum to a subset —
+   REPLACE INTO deletes and re-inserts the row, so partial statements would
+   silently reset unlisted columns
+5. **Atomic Operations**: REPLACE INTO is atomic within InnoDB
+6. **Sample Limits**: Use `--max-sample-differences` to control statement
+   count; if the file does not cover every difference found, a warning is
+   logged and written into the file
+7. **Fresh Output**: the sync SQL file is truncated at the start of each run so
+   it never contains stale statements from a previous run
 
 ### Best Practices
 
-1. **Review Before Applying**: Always review generated SQL before execution
+1. **Review Before Applying**: Always review generated SQL before execution —
+   `go-data-sync` runs in dry-run mode by default for exactly this reason
 2. **Test on Staging**: Test sync SQL on non-production environments first
 3. **Backup Target**: Take a backup of target database before applying changes
-4. **Handle Target-Only**: Manually review and handle target-only records
-5. **Use Transactions**: Wrap sync SQL in transactions when applying:
-   ```sql
-   START TRANSACTION;
-   source sync.sql
-   COMMIT;  -- or ROLLBACK if something looks wrong
-   ```
-
-### Workflow Example
-
-```bash
-# Step 1: Find differences and generate sync SQL
-./bin/go-data-checksum \
-  --source-db-host="prod.example.com" \
-  --source-db-user="readonly" \
-  --source-db-password="xxx" \
-  --target-db-host="replica.example.com" \
-  --target-db-user="readonly" \
-  --target-db-password="xxx" \
-  --source-db-name="production" \
-  --source-table-name="orders" \
-  --enable-differential-reporting \
-  --generate-sync-sql \
-  --sync-sql-file="sync_orders.sql" \
-  --max-sample-differences=10000
-
-# Step 2: Review the generated SQL
-less sync_orders.sql
-
-# Step 3: Apply to target (with transaction)
-mysql -h replica.example.com -u admin -p -e "
-START TRANSACTION;
-source sync_orders.sql;
--- Review changes here
-COMMIT;
-"
-
-# Step 4: Verify sync worked
-./bin/go-data-checksum \
-  --source-db-host="prod.example.com" \
-  --target-db-host="replica.example.com" \
-  --source-db-name="production" \
-  --source-table-name="orders" \
-  --enable-differential-reporting
-```
+4. **Handle Target-Only**: Manually review and handle target-only records —
+   they are never included in the generated SQL
+5. **Apply with go-data-sync**: it validates that the file contains only
+   REPLACE INTO statements and applies them in transactional batches
+   (see "COMPANION CLI: go-data-sync" below and EXAMPLES #3 for the full
+   find → review → sync → re-verify workflow)
 
 
 ## TEST
@@ -335,30 +363,59 @@ COMMIT;
   --threads=4
 ```
 
-## TRACKING FUNCTIONALITY
+## COMPANION CLI: go-data-sync
 
-go-data-checksum 提供了增强的跟踪功能，允许用户更精确地监控和记录数据核对过程中的各个步骤。通过以下选项，用户可以启用并配置跟踪功能：
+`go-data-sync` (built alongside the checksum binary by `make build`) applies a
+sync SQL file generated with `--generate-sync-sql` to the target instance.
 
-  -enable-tracking
-        Enable tracking functionality. Default: false
-  -tracking-db-host string
-        Tracking MySQL hostname for storing tracking information (default "127.0.0.1")
-  -tracking-db-name string
-        Tracking database name for storing tracking information.
-  -tracking-db-user string
-        MySQL user for tracking database.
-  -tracking-db-password string
-        MySQL password for tracking database.
-  -tracking-table-name string
-        Table name for storing tracking information.
-  -tracking-log-file string
-        Log file for tracking information.
-  -tracking-level int
-        Level of tracking information to be logged. (default 1)
-  -tracking-format string
-        Format of tracking information, eg: json or csv (default "json")
+```
+  -sql-file string
+        Sync SQL file generated by go-data-checksum --generate-sync-sql (required)
+  -target-db-host string
+        Target MySQL hostname (default "127.0.0.1")
+  -target-db-port int
+        Target MySQL port (default 3306)
+  -target-db-user string
+        Target MySQL user
+  -target-db-password string
+        Target MySQL password
+  -execute
+        Actually apply the statements. Without this flag the tool runs in dry-run mode.
+  -batch-size int
+        Number of statements per transaction (default 100)
+  -conn-db-timeout int
+        connect db timeout in seconds (default 60)
+  -version
+        Print version & exit
+```
 
-通过以上选项，用户可以将跟踪信息存储到指定的 MySQL 数据库中，或者输出到指定的日志文件中。跟踪信息包括但不限于：核对开始时间、结束时间、持续时长、处理的表名、记录数等。
+Safety model:
+
+- **Dry-run by default** — shows a per-table statement summary and a preview;
+  nothing is executed until you pass `--execute`.
+- **REPLACE INTO only** — any other statement in the file aborts the run before
+  anything is executed.
+- **Transactional batches** — a failed batch is rolled back and the run stops,
+  reporting the exact line number of the failing statement.
+- Reports rows *inserted* (missing on target) vs *replaced* (modified on target).
+
+```bash
+# 1. Find differences and generate sync SQL
+./bin/go-data-checksum ... --enable-differential-reporting \
+  --generate-sync-sql --sync-sql-file=sync_orders.sql --max-sample-differences=10000
+
+# 2. Review, then dry-run
+./bin/go-data-sync --sql-file=sync_orders.sql \
+  --target-db-host=replica.example.com --target-db-user=admin --target-db-password=xxx
+
+# 3. Apply
+./bin/go-data-sync --sql-file=sync_orders.sql \
+  --target-db-host=replica.example.com --target-db-user=admin --target-db-password=xxx \
+  --execute
+
+# 4. Re-verify
+./bin/go-data-checksum ... --enable-differential-reporting
+```
 
 ## Testing
 
@@ -425,7 +482,7 @@ mysql --defaults-group-suffix=_replica1 -e "SELECT id FROM sbtest.sbtest3 WHERE 
   --logfile="comparison.log"
 
   
-time="2025-06-06T11:39:39-07:00" level=info msg="Staring go-data-checksum dev..."
+time="2025-06-06T11:39:39-07:00" level=info msg="Starting go-data-checksum dev..."
 time="2025-06-06T11:39:39-07:00" level=info msg="24 pairs of source and target tables:"
 time="2025-06-06T11:39:39-07:00" level=info msg="Table map: sbtest.sbtest1 => sbtest.sbtest1 ."
 time="2025-06-06T11:39:39-07:00" level=info msg="Table map: sbtest.sbtest10 => sbtest.sbtest10 ."
@@ -509,13 +566,13 @@ time="2025-06-06T11:39:47-07:00" level=info msg="Starting differential analysis 
 time="2025-06-06T11:39:47-07:00" level=info msg="=== DIFFERENTIAL ANALYSIS RESULTS ==="
 time="2025-06-06T11:39:47-07:00" level=info msg="Table Pair: sbtest.sbtest3 => sbtest.sbtest3"
 time="2025-06-06T11:39:47-07:00" level=error msg="- 5 records exist only in SOURCE"
-time="2025-06-06T11:39:47-07:00" level=info msg="= 50045 records are identical"
+time="2025-06-06T11:39:47-07:00" level=info msg="= 99995 records are identical"
 time="2025-06-06T11:39:47-07:00" level=info msg="=== SAMPLE DIFFERENCES ==="
-time="2025-06-06T11:39:47-07:00" level=error msg="- Record (id=[53 48 48 48 51]) exists only in source"
-time="2025-06-06T11:39:47-07:00" level=error msg="- Record (id=[53 48 48 48 48]) exists only in source"
-time="2025-06-06T11:39:47-07:00" level=error msg="- Record (id=[53 48 48 48 49]) exists only in source"
-time="2025-06-06T11:39:47-07:00" level=error msg="- Record (id=[53 48 48 48 50]) exists only in source"
-time="2025-06-06T11:39:47-07:00" level=error msg="- Record (id=[53 48 48 48 52]) exists only in source"
+time="2025-06-06T11:39:47-07:00" level=error msg="- Record (id=50000) exists only in source"
+time="2025-06-06T11:39:47-07:00" level=error msg="- Record (id=50001) exists only in source"
+time="2025-06-06T11:39:47-07:00" level=error msg="- Record (id=50002) exists only in source"
+time="2025-06-06T11:39:47-07:00" level=error msg="- Record (id=50003) exists only in source"
+time="2025-06-06T11:39:47-07:00" level=error msg="- Record (id=50004) exists only in source"
 time="2025-06-06T11:39:47-07:00" level=info msg="=== END DIFFERENTIAL ANALYSIS ==="
 time="2025-06-06T11:39:47-07:00" level=info msg="Starting check table pair: sbtest.sbtest4 => sbtest.sbtest4 ."
 time="2025-06-06T11:39:47-07:00" level=info msg="Info: record CRC32 checksum value is equal of table pair: sbtest.sbtest4 => sbtest.sbtest4 , tableCheckDuration=256.227545ms, tableCheckSpeed= 100000 rows/second."

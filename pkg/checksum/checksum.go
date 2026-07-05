@@ -124,6 +124,36 @@ func (ctx *ChecksumContext) GetCheckColumns() (err error) {
 	return err
 }
 
+// GetAllColumns returns the complete ordered column list of the source table.
+// Sync SQL must always cover every column: REPLACE INTO deletes the target row
+// and re-inserts it, so a partial column list would reset unlisted columns.
+func (ctx *ChecksumContext) GetAllColumns() (*types.ColumnList, error) {
+	query := `
+    select
+      GROUP_CONCAT(COLUMN_NAME ORDER BY ORDINAL_POSITION ASC) AS COLUMN_NAMES
+      from information_schema.columns
+     where table_schema= ? and table_name = ?
+  `
+	var columnList *types.ColumnList
+	err := func() error {
+		trx, err := ctx.Context.SourceDB.Begin()
+		if err != nil {
+			return err
+		}
+		defer trx.Rollback()
+		if _, err := trx.Exec(`SET SESSION group_concat_max_len = 10240`); err != nil {
+			return err
+		}
+		var columnNames string
+		if err := trx.QueryRow(query, ctx.PerTableContext.SourceDatabaseName, ctx.PerTableContext.SourceTableName).Scan(&columnNames); err != nil {
+			return fmt.Errorf("critical: table %s.%s get all columns failed: %v", ctx.PerTableContext.SourceDatabaseName, ctx.PerTableContext.SourceTableName, err)
+		}
+		columnList = types.ParseColumnList(columnNames)
+		return trx.Commit()
+	}()
+	return columnList, err
+}
+
 // GetUniqueKeys investigates a table and returns the list of unique keys
 // candidate for chunking
 func (ctx *ChecksumContext) GetUniqueKeys() (err error) {
@@ -325,25 +355,6 @@ func (ctx *ChecksumContext) IterationQueryChecksum() (isChunkChecksumEqual bool,
 		duration = time.Since(startTime)
 	}()
 
-	// 判断有序集subset是否superset的子集,这里可以沿用类似归档排序方式,主要由于主键是可以保证顺序一样
-	subsetCheckFunc := func(subset []string, superset []string) bool {
-		startIndex := 0
-		for i := 0; i < len(subset); i++ {
-			founded := false
-			for j := startIndex; j < len(superset); j++ {
-				if subset[i] == superset[j] {
-					startIndex = j + 1
-					founded = true
-					break
-				}
-			}
-			if !founded {
-				return false
-			}
-		}
-		return true
-	}
-
 	// 计算CRC32XOR聚合值，还是逐行CRC32值
 	var checkLevel int64 = 1
 	if ctx.Context.IsSuperSetAsEqual {
@@ -368,10 +379,8 @@ func (ctx *ChecksumContext) IterationQueryChecksum() (isChunkChecksumEqual bool,
 	if reflect.DeepEqual(sourceResult, targetResult) {
 		return true, duration, nil
 	} else if checkLevel == 2 {
-		if isSuperset := subsetCheckFunc(sourceResult, targetResult); !isSuperset {
-			return false, duration, nil
-		}
-		return true, duration, nil
+		// 判断有序集subset是否superset的子集,这里可以沿用类似归档排序方式,主要由于主键是可以保证顺序一样
+		return isOrderedSubset(sourceResult, targetResult), duration, nil
 	}
 	return false, duration, nil
 }
