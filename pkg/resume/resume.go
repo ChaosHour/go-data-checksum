@@ -1,64 +1,30 @@
+// Package resume loads the pending tables of a previously tracked job so the
+// normal checksum flow can re-check them. Resume re-checks each pending table
+// from the beginning; chunk-level mid-table resume is deliberately out of scope.
 package resume
 
 import (
-	"database/sql"
 	"fmt"
 
-	"github.com/ChaosHour/go-data-checksum/pkg/checksum"
 	"github.com/ChaosHour/go-data-checksum/pkg/tracking"
-	"github.com/ChaosHour/go-data-checksum/pkg/types"
 )
 
-func ResumeJob(baseContext *types.BaseContext, trackingDB *sql.DB, jobID string) error {
-	tracker := &tracking.JobTracker{
-		TrackingDB: trackingDB,
-		JobID:      jobID,
-	}
-
+// LoadPendingTables returns the pending/running tables of the tracker's job as
+// a source→target pair map plus a source-full-name→comparison_id map. The
+// caller reuses each comparison_id so results land on the existing
+// table_comparisons rows instead of inserting duplicates.
+func LoadPendingTables(tracker *tracking.JobTracker) (pairs map[string]string, comparisonIDs map[string]int64, err error) {
 	pendingTables, err := tracker.GetPendingTables()
 	if err != nil {
-		return fmt.Errorf("failed to get pending tables: %v", err)
+		return nil, nil, fmt.Errorf("failed to get pending tables: %v", err)
 	}
 
-	baseContext.Log.Infof("Resuming job %s with %d pending tables", jobID, len(pendingTables))
-
-	// Continue processing from where we left off
+	pairs = make(map[string]string, len(pendingTables))
+	comparisonIDs = make(map[string]int64, len(pendingTables))
 	for _, table := range pendingTables {
-		baseContext.Log.Debugf("Processing pending table: %s.%s => %s.%s",
-			table.SourceDatabase, table.SourceTable,
-			table.TargetDatabase, table.TargetTable)
-
-		// Create table context and checksum context for processing
-		tableContext := types.NewTableContext(
-			table.SourceDatabase, table.SourceTable,
-			table.TargetDatabase, table.TargetTable)
-
-		checksumContext := checksum.NewChecksumContext(baseContext, tableContext)
-		checksumContext.JobTracker = tracker
-		checksumContext.ComparisonID = table.ComparisonID
-
-		// Perform the comparison with differential reporting
-		err := performTableComparisonWithDiff(checksumContext)
-		if err != nil {
-			baseContext.Log.Errorf("Failed to process table %s.%s: %v",
-				table.SourceDatabase, table.SourceTable, err)
-		}
+		sourceFullName := fmt.Sprintf("%s.%s", table.SourceDatabase, table.SourceTable)
+		pairs[sourceFullName] = fmt.Sprintf("%s.%s", table.TargetDatabase, table.TargetTable)
+		comparisonIDs[sourceFullName] = table.ComparisonID
 	}
-
-	return nil
-}
-
-// performTableComparisonWithDiff performs table comparison and reports differences
-func performTableComparisonWithDiff(ctx *checksum.ChecksumContext) error {
-	// Get unique keys and check columns
-	if err := ctx.GetUniqueKeys(); err != nil {
-		return err
-	}
-	if err := ctx.GetCheckColumns(); err != nil {
-		return err
-	}
-
-	// Perform differential analysis
-	differ := &checksum.TableDiffer{Context: ctx}
-	return differ.AnalyzeAndReportDifferences()
+	return pairs, comparisonIDs, nil
 }

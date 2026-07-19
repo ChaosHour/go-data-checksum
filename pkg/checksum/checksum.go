@@ -42,20 +42,18 @@ type ChecksumContext struct {
 	SourceResultQueue               chan *crc32ResultStruct
 	TargetResultQueue               chan *crc32ResultStruct
 
-	// Add tracking fields
+	// Tracking state; JobTracker nil means tracking is disabled.
 	JobTracker   *tracking.JobTracker
 	ComparisonID int64
-	ChunkTracker map[int]*ChunkProgress
-}
+	// Row counts from the count precheck; -1 means unknown (recorded as NULL).
+	SourceRowCount int64
+	TargetRowCount int64
 
-type ChunkProgress struct {
-	ChunkNumber    int
-	StartTime      time.Time
-	EndTime        time.Time
-	SourceChecksum string
-	TargetChecksum string
-	IsEqual        bool
-	ErrorMessage   string
+	lastSourceChecksum string
+	lastTargetChecksum string
+	chunksEqual        int
+	chunksDifferent    int
+	chunksError        int
 }
 
 // NewChecksumContext(context *types.BaseContext, perTableContext *types.TableContext) *ChecksumContext {
@@ -65,7 +63,8 @@ func NewChecksumContext(context *types.BaseContext, perTableContext *types.Table
 		PerTableContext:   perTableContext,
 		SourceResultQueue: make(chan *crc32ResultStruct),
 		TargetResultQueue: make(chan *crc32ResultStruct),
-		ChunkTracker:      make(map[int]*ChunkProgress),
+		SourceRowCount:    -1,
+		TargetRowCount:    -1,
 	}
 }
 
@@ -362,6 +361,8 @@ func (ctx *ChecksumContext) IterationQueryChecksum() (isChunkChecksumEqual bool,
 	} else {
 		sourceResult, targetResult = sourceResultStruct.result, targetResultStruct.result
 	}
+	ctx.lastSourceChecksum = checksumSummary(sourceResult)
+	ctx.lastTargetChecksum = checksumSummary(targetResult)
 
 	// atomic.AddInt64(&this.PerTableContext.Iteration, 1)
 	if reflect.DeepEqual(sourceResult, targetResult) {
@@ -413,16 +414,15 @@ func (ctx *ChecksumContext) QueryChecksumFunc(db *gosql.DB, databaseName, tableN
 }
 
 // DataChecksumByCount compares the total row counts of the source and target tables. With IsSuperSetAsEqual=false only equal counts pass; otherwise source <= target also passes. Returns whether the counts match and whether further checking is needed.
-func (ctx *ChecksumContext) DataChecksumByCount() (isTableCountEqual bool, isMoreCheckNeeded bool, err error) {
+func (ctx *ChecksumContext) DataChecksumByCount() (isTableCountEqual bool, isMoreCheckNeeded bool, sourceRowCount int64, targetRowCount int64, err error) {
 	SourceQueryTableCount := fmt.Sprintf("select /* dataChecksum */ count(*) from %s.%s", types.EscapeName(ctx.PerTableContext.SourceDatabaseName), types.EscapeName(ctx.PerTableContext.SourceTableName))
 	TargetQueryTableCount := fmt.Sprintf("select /* dataChecksum */ count(*) from %s.%s", types.EscapeName(ctx.PerTableContext.TargetDatabaseName), types.EscapeName(ctx.PerTableContext.TargetTableName))
-	var sourceRowCount int64
-	var targetRowCount int64
+	sourceRowCount, targetRowCount = -1, -1
 	if err = ctx.Context.SourceDB.QueryRow(SourceQueryTableCount).Scan(&sourceRowCount); err != nil {
-		return false, false, fmt.Errorf("critical: Table %s.%s query sourceRowCount failed", ctx.PerTableContext.SourceDatabaseName, ctx.PerTableContext.SourceTableName)
+		return false, false, sourceRowCount, targetRowCount, fmt.Errorf("critical: Table %s.%s query sourceRowCount failed", ctx.PerTableContext.SourceDatabaseName, ctx.PerTableContext.SourceTableName)
 	}
 	if err = ctx.Context.TargetDB.QueryRow(TargetQueryTableCount).Scan(&targetRowCount); err != nil {
-		return false, false, fmt.Errorf("critical: Table %s.%s query TargetRowCount failed", ctx.PerTableContext.TargetDatabaseName, ctx.PerTableContext.TargetTableName)
+		return false, false, sourceRowCount, targetRowCount, fmt.Errorf("critical: Table %s.%s query TargetRowCount failed", ctx.PerTableContext.TargetDatabaseName, ctx.PerTableContext.TargetTableName)
 	}
 
 	if sourceRowCount == targetRowCount {
@@ -443,5 +443,5 @@ func (ctx *ChecksumContext) DataChecksumByCount() (isTableCountEqual bool, isMor
 		isMoreCheckNeeded = false
 	}
 
-	return isTableCountEqual, isMoreCheckNeeded, nil
+	return isTableCountEqual, isMoreCheckNeeded, sourceRowCount, targetRowCount, nil
 }

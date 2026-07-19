@@ -1,8 +1,5 @@
--- Reference copy for manual installs. The go-data-checksum binary embeds
--- pkg/tracking/schema.sql and auto-creates this schema when --enable-tracking
--- is used; keep the two files in sync.
-CREATE DATABASE IF NOT EXISTS data_checksum_tracking;
-USE data_checksum_tracking;
+-- Embedded tracking schema, applied by EnsureSchema on a connection already
+-- scoped to the tracking database. Keep in sync with schema/tracking_schema.sql.
 
 -- Main job tracking table
 CREATE TABLE IF NOT EXISTS checksum_jobs (
@@ -50,7 +47,7 @@ CREATE TABLE IF NOT EXISTS chunk_comparisons (
     chunk_id BIGINT AUTO_INCREMENT PRIMARY KEY,
     comparison_id BIGINT NOT NULL,
     chunk_number INT NOT NULL,
-    range_start JSON NOT NULL,  -- Store the key range as JSON
+    range_start JSON NOT NULL,
     range_end JSON NOT NULL,
     status ENUM('equal', 'different', 'error') NOT NULL,
     source_checksum VARCHAR(64) NULL,
@@ -72,7 +69,7 @@ CREATE TABLE IF NOT EXISTS difference_details (
     primary_key_values JSON NOT NULL,
     source_checksum VARCHAR(64) NULL,
     target_checksum VARCHAR(64) NULL,
-    sample_data JSON NULL,  -- Store a sample of the differing data
+    sample_data JSON NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (chunk_id) REFERENCES chunk_comparisons(chunk_id),
     INDEX idx_chunk_type (chunk_id, difference_type)

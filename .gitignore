@@ -38,4 +38,7 @@ dist/
 # Local planning and notes
 PLAN.md
 
+# graphify knowledge-graph output (local tooling artifact)
+graphify-out/
+
 tags
