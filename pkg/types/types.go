@@ -35,6 +35,9 @@ type TableContext struct {
 	TargetTableName    string
 	FinishedFlag       int64
 	Iteration          int64
+	// ComparisonID is non-zero only on resume, where the table_comparisons row
+	// already exists and must be reused instead of inserted.
+	ComparisonID int64
 }
 
 func NewTableContext(sourceDatabaseName, sourceTableName, targetDatabaseName, targetTableName string) *TableContext {
@@ -60,6 +63,15 @@ type BaseContext struct {
 	Timeout      int
 	SourceDB     *gosql.DB
 	TargetDB     *gosql.DB
+
+	EnableTracking bool
+	TrackingDBHost string
+	TrackingDBPort int
+	TrackingDBUser string
+	TrackingDBPass string
+	TrackingDBName string
+	ResumeJobID    string
+	TrackingDB     *gosql.DB
 
 	SourceDatabases         string
 	SourceTables            string
@@ -179,9 +191,15 @@ func (ctx *BaseContext) IsDatetimeColumnSpecified() bool {
 	}
 }
 
+// BuildDBUri builds a mysql driver DSN with the connection options shared by
+// all of this tool's connections.
+func BuildDBUri(user, password, host string, port int, databaseName string, timeoutSeconds int) string {
+	return fmt.Sprintf("%s:%s@tcp(%s:%d)/%s?parseTime=true&loc=Local&timeout=%ds&readTimeout=%ds&writeTimeout=%ds&interpolateParams=true&charset=utf8mb4", user, password, host, port, databaseName, timeoutSeconds, timeoutSeconds, timeoutSeconds)
+}
+
 func (ctx *BaseContext) GetDBUri(databaseName string) (string, string) {
-	sourceDBUri := fmt.Sprintf("%s:%s@tcp(%s:%d)/%s?parseTime=true&loc=Local&timeout=%ds&readTimeout=%ds&writeTimeout=%ds&interpolateParams=true&charset=utf8mb4", ctx.SourceDBUser, ctx.SourceDBPass, ctx.SourceDBHost, ctx.SourceDBPort, databaseName, ctx.Timeout, ctx.Timeout, ctx.Timeout)
-	targetDBUri := fmt.Sprintf("%s:%s@tcp(%s:%d)/%s?parseTime=true&loc=Local&timeout=%ds&readTimeout=%ds&writeTimeout=%ds&interpolateParams=true&charset=utf8mb4", ctx.TargetDBUser, ctx.TargetDBPass, ctx.TargetDBHost, ctx.TargetDBPort, databaseName, ctx.Timeout, ctx.Timeout, ctx.Timeout)
+	sourceDBUri := BuildDBUri(ctx.SourceDBUser, ctx.SourceDBPass, ctx.SourceDBHost, ctx.SourceDBPort, databaseName, ctx.Timeout)
+	targetDBUri := BuildDBUri(ctx.TargetDBUser, ctx.TargetDBPass, ctx.TargetDBHost, ctx.TargetDBPort, databaseName, ctx.Timeout)
 	return sourceDBUri, targetDBUri
 }
 
@@ -211,10 +229,68 @@ func (ctx *BaseContext) InitDB() (err error) {
 	return nil
 }
 
-// CloseDB closes the source and target database connections
+// InitTrackingDB resolves tracking connection settings (falling back to the
+// target DB settings for anything not given), creates the tracking database if
+// needed, and opens a pool scoped to it.
+func (ctx *BaseContext) InitTrackingDB() (*gosql.DB, error) {
+	if ctx.TrackingDBHost == "" {
+		ctx.TrackingDBHost = ctx.TargetDBHost
+	}
+	if ctx.TrackingDBPort == 0 {
+		ctx.TrackingDBPort = ctx.TargetDBPort
+	}
+	if ctx.TrackingDBUser == "" {
+		ctx.TrackingDBUser = ctx.TargetDBUser
+	}
+	if ctx.TrackingDBPass == "" {
+		ctx.TrackingDBPass = ctx.TargetDBPass
+	}
+	if ctx.TrackingDBName == "" {
+		ctx.TrackingDBName = "data_checksum_tracking"
+	}
+
+	initDBConnect := func(dbUri string) (db *gosql.DB, err error) {
+		if db, err = gosql.Open("mysql", dbUri); err != nil {
+			return db, err
+		}
+		if err = db.Ping(); err != nil {
+			db.Close()
+			return nil, err
+		}
+		db.SetConnMaxLifetime(time.Minute * 3)
+		db.SetMaxIdleConns(30)
+		return db, nil
+	}
+
+	bootstrap, err := initDBConnect(BuildDBUri(ctx.TrackingDBUser, ctx.TrackingDBPass, ctx.TrackingDBHost, ctx.TrackingDBPort, "information_schema", ctx.Timeout))
+	if err != nil {
+		return nil, err
+	}
+	_, err = bootstrap.Exec(fmt.Sprintf("CREATE DATABASE IF NOT EXISTS %s", EscapeName(ctx.TrackingDBName)))
+	bootstrap.Close()
+	if err != nil {
+		return nil, err
+	}
+
+	trackingDB, err := initDBConnect(BuildDBUri(ctx.TrackingDBUser, ctx.TrackingDBPass, ctx.TrackingDBHost, ctx.TrackingDBPort, ctx.TrackingDBName, ctx.Timeout))
+	if err != nil {
+		return nil, err
+	}
+	ctx.TrackingDB = trackingDB
+	return trackingDB, nil
+}
+
+// CloseDB closes the source, target and tracking database connections
 func (ctx *BaseContext) CloseDB() {
-	ctx.TargetDB.Close()
-	ctx.SourceDB.Close()
+	if ctx.TargetDB != nil {
+		ctx.TargetDB.Close()
+	}
+	if ctx.SourceDB != nil {
+		ctx.SourceDB.Close()
+	}
+	if ctx.TrackingDB != nil {
+		ctx.TrackingDB.Close()
+	}
 }
 
 // ListenOnPanicAbort aborts on abort request

@@ -15,6 +15,8 @@ import (
 	"time"
 
 	"github.com/ChaosHour/go-data-checksum/pkg/checksum"
+	"github.com/ChaosHour/go-data-checksum/pkg/resume"
+	"github.com/ChaosHour/go-data-checksum/pkg/tracking"
 	"github.com/ChaosHour/go-data-checksum/pkg/types"
 )
 
@@ -24,6 +26,8 @@ var AppVersion string
 type ChecksumJob struct {
 	ChecksumJobChan chan int
 	wg              *sync.WaitGroup
+	// Tracker is nil unless --enable-tracking is set.
+	Tracker *tracking.JobTracker
 }
 
 func NewChecksumJob(threads int) *ChecksumJob {
@@ -190,15 +194,20 @@ func (job *ChecksumJob) ChecksumPerTable(baseContext *types.BaseContext, tableCo
 	}()
 
 	ChecksumContext := checksum.NewChecksumContext(baseContext, tableContext)
+	ChecksumContext.JobTracker = job.Tracker
+	ChecksumContext.ComparisonID = tableContext.ComparisonID
+	ChecksumContext.TrackTableStart()
+	defer func() { ChecksumContext.TrackTableDone(isEqual, err) }()
 	baseContext.Log.Infof("Starting check table pair: %s.%s => %s.%s .", ChecksumContext.PerTableContext.SourceDatabaseName, ChecksumContext.PerTableContext.SourceTableName, ChecksumContext.PerTableContext.TargetDatabaseName, ChecksumContext.PerTableContext.TargetTableName)
 
 	// First verify the full-table count(*) values match
 	if !baseContext.IgnoreRowCountCheck {
 		baseContext.Log.Debugf("DataChecksumByCount of table pair: %s.%s => %s.%s .", ChecksumContext.PerTableContext.SourceDatabaseName, ChecksumContext.PerTableContext.SourceTableName, ChecksumContext.PerTableContext.TargetDatabaseName, ChecksumContext.PerTableContext.TargetTableName)
-		_, isMoreCheckNeeded, err := ChecksumContext.DataChecksumByCount()
+		_, isMoreCheckNeeded, sourceRowCount, targetRowCount, err := ChecksumContext.DataChecksumByCount()
 		if err != nil {
 			return false, err
 		}
+		ChecksumContext.SourceRowCount, ChecksumContext.TargetRowCount = sourceRowCount, targetRowCount
 		if !isMoreCheckNeeded {
 			// Row counts differ: still run record-level analysis when differential reporting is enabled
 			if baseContext.EnableDifferentialReporting {
@@ -257,7 +266,9 @@ func (job *ChecksumJob) ChecksumPerTable(baseContext *types.BaseContext, tableCo
 					break
 				}
 			}
+			chunkNumber := int(ChecksumContext.GetIteration())
 			ChecksumContext.AddIteration()
+			ChecksumContext.TrackChunk(chunkNumber, isChunkChecksumEqual, err, duration)
 			if err != nil {
 				tableCheckDuration = time.Since(startTime)
 				baseContext.Log.Errorf("Critical: record CRC32 checksum value is not equal of table pair: %s.%s => %s.%s , tableCheckDuration=%+v", ChecksumContext.PerTableContext.SourceDatabaseName, ChecksumContext.PerTableContext.SourceTableName, ChecksumContext.PerTableContext.TargetDatabaseName, ChecksumContext.PerTableContext.TargetTableName, tableCheckDuration)
@@ -301,6 +312,10 @@ func (job *ChecksumJob) ChecksumPerTableViaTimeColumn(baseContext *types.BaseCon
 	}()
 
 	ChecksumContext := checksum.NewChecksumContext(baseContext, tableContext)
+	ChecksumContext.JobTracker = job.Tracker
+	ChecksumContext.ComparisonID = tableContext.ComparisonID
+	ChecksumContext.TrackTableStart()
+	defer func() { ChecksumContext.TrackTableDone(isEqual, err) }()
 	baseContext.Log.Infof("Starting check table pair: %s.%s => %s.%s .", ChecksumContext.PerTableContext.SourceDatabaseName, ChecksumContext.PerTableContext.SourceTableName, ChecksumContext.PerTableContext.TargetDatabaseName, ChecksumContext.PerTableContext.TargetTableName)
 
 	// Use the user-requested check columns, defaulting to all columns of the table
@@ -349,7 +364,9 @@ func (job *ChecksumJob) ChecksumPerTableViaTimeColumn(baseContext *types.BaseCon
 					break
 				}
 			}
+			chunkNumber := int(ChecksumContext.GetIteration())
 			ChecksumContext.AddIteration()
+			ChecksumContext.TrackChunk(chunkNumber, isChunkChecksumEqual, err, duration)
 			if err != nil {
 				tableCheckDuration = time.Since(startTime)
 				baseContext.Log.Errorf("Critical: record CRC32 checksum value is not equal of table pair: %s.%s => %s.%s , tableCheckDuration=%+v", ChecksumContext.PerTableContext.SourceDatabaseName, ChecksumContext.PerTableContext.SourceTableName, ChecksumContext.PerTableContext.TargetDatabaseName, ChecksumContext.PerTableContext.TargetTableName, tableCheckDuration)
@@ -385,8 +402,22 @@ func (job *ChecksumJob) ChecksumPerTableViaTimeColumn(baseContext *types.BaseCon
 
 // checksum runs the check across all table pairs
 func (job *ChecksumJob) checksum(baseContext *types.BaseContext) {
-	// Build the source and target table pairs
-	if err := GenerateTableList(baseContext); err != nil {
+	// Build the source and target table pairs: from the tracking database on
+	// resume, otherwise by scanning information_schema.
+	comparisonIDs := map[string]int64{}
+	if baseContext.ResumeJobID != "" {
+		pairs, resumeComparisonIDs, err := resume.LoadPendingTables(job.Tracker)
+		if err != nil {
+			baseContext.Log.Errorf("Loading pending tables of job %s failed, %s", baseContext.ResumeJobID, err.Error())
+			baseContext.PanicAbort <- err
+			return
+		}
+		if len(pairs) == 0 {
+			baseContext.Log.Infof("Job %s has no pending tables to resume.", baseContext.ResumeJobID)
+		}
+		baseContext.PairOfSourceAndTargetTables = pairs
+		comparisonIDs = resumeComparisonIDs
+	} else if err := GenerateTableList(baseContext); err != nil {
 		baseContext.Log.Errorf("Generating source and target tables failed, %s", err.Error())
 		baseContext.PanicAbort <- err
 		return
@@ -416,6 +447,7 @@ func (job *ChecksumJob) checksum(baseContext *types.BaseContext) {
 		targetDatabase := strings.Split(targetFullTableName, ".")[0]
 		targetTable := strings.Split(targetFullTableName, ".")[1]
 		tableContext := types.NewTableContext(sourceDatabase, sourceTable, targetDatabase, targetTable)
+		tableContext.ComparisonID = comparisonIDs[sourceFullTableName]
 
 		job.ChecksumJobChan <- 1
 		job.wg.Add(1)
@@ -448,6 +480,19 @@ func (job *ChecksumJob) checksum(baseContext *types.BaseContext) {
 		baseContext.Log.Errorf("Table records check result %d equal, %d not equal.", tableResultEqualNum, tableNum-tableResultEqualNum)
 	}
 	job.wg.Wait()
+
+	if job.Tracker != nil {
+		var trackErr error
+		if baseContext.ResumeJobID != "" {
+			// Aggregate over table_comparisons: the resumed run only re-checked pending tables
+			trackErr = job.Tracker.CompleteJobFromTables()
+		} else {
+			trackErr = job.Tracker.CompleteJob(tableNum, tableResultEqualNum, tableNum-tableResultEqualNum)
+		}
+		if trackErr != nil {
+			baseContext.Log.Warnf("tracking: complete job failed: %v", trackErr)
+		}
+	}
 }
 
 func main() {
@@ -486,6 +531,13 @@ func main() {
 	flag.BoolVar(&baseContext.IsSuperSetAsEqual, "is-superset-as-equal", false, "Shall we think that the records in target table is the superset of the source as equal? By default, we think the records are exactly equal as equal.")
 	flag.BoolVar(&baseContext.IgnoreRowCountCheck, "ignore-row-count-check", false, "Shall we ignore check by counting rows? Default: false")
 	flag.IntVar(&baseContext.ParallelThreads, "threads", 1, "Parallel threads of table checksum.")
+	flag.BoolVar(&baseContext.EnableTracking, "enable-tracking", false, "Persist job/table/chunk results to a tracking database (pt-table-checksum style).")
+	flag.StringVar(&baseContext.TrackingDBHost, "tracking-db-host", "", "Tracking MySQL hostname (default: target-db-host).")
+	flag.IntVar(&baseContext.TrackingDBPort, "tracking-db-port", 0, "Tracking MySQL port (default: target-db-port).")
+	flag.StringVar(&baseContext.TrackingDBUser, "tracking-db-user", "", "Tracking MySQL user (default: target-db-user).")
+	flag.StringVar(&baseContext.TrackingDBPass, "tracking-db-password", "", "Tracking MySQL password (default: target-db-password).")
+	flag.StringVar(&baseContext.TrackingDBName, "tracking-db-name", "data_checksum_tracking", "Tracking database name; auto-created if missing.")
+	flag.StringVar(&baseContext.ResumeJobID, "resume-job-id", "", "Resume a previous tracked job by job_id (implies --enable-tracking).")
 	debug := flag.Bool("debug", false, "debug mode (very verbose)")
 	logFile := flag.String("logfile", "", "Log file name.")
 	version := flag.Bool("version", false, "Print version & exit")
@@ -532,6 +584,33 @@ func main() {
 
 	// Run the check job
 	ChecksumJob := NewChecksumJob(baseContext.ParallelThreads)
+
+	// Set up persistent tracking. Setup failures are fatal (the user opted in);
+	// runtime tracking write failures only warn.
+	if baseContext.ResumeJobID != "" {
+		baseContext.EnableTracking = true
+	}
+	if baseContext.EnableTracking {
+		trackingDB, err := baseContext.InitTrackingDB()
+		if err != nil {
+			baseContext.Log.Fatalf("Tracking DB initiate failed: %v", err)
+		}
+		if err := tracking.EnsureSchema(trackingDB); err != nil {
+			baseContext.Log.Fatalf("Tracking schema creation failed: %v", err)
+		}
+		if baseContext.ResumeJobID != "" {
+			ChecksumJob.Tracker, err = tracking.AttachJobTracker(trackingDB, baseContext.ResumeJobID)
+		} else {
+			ChecksumJob.Tracker, err = tracking.NewJobTracker(trackingDB,
+				fmt.Sprintf("%s:%d", baseContext.SourceDBHost, baseContext.SourceDBPort),
+				fmt.Sprintf("%s:%d", baseContext.TargetDBHost, baseContext.TargetDBPort))
+		}
+		if err != nil {
+			baseContext.Log.Fatalf("Tracking job initiate failed: %v", err)
+		}
+		baseContext.Log.Infof("Tracking enabled, job_id=%s (database %s).", ChecksumJob.Tracker.JobID, baseContext.TrackingDBName)
+	}
+
 	ChecksumJob.checksum(baseContext)
 
 }

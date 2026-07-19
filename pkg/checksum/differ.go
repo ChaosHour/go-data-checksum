@@ -99,6 +99,9 @@ func (td *TableDiffer) AnalyzeAndReportDifferences() error {
 	// Report final results
 	td.reportResults(report)
 
+	// Persist sampled differences when tracking is enabled
+	ctx.TrackDifferenceDetails(report.SampleDifferences)
+
 	// Generate sync SQL if requested
 	if ctx.Context.GenerateSyncSQL {
 		if err := td.generateSyncSQL(report); err != nil {

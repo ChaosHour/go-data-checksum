@@ -143,6 +143,8 @@ func (ctx *ChecksumContext) IterationTimeRangeQueryChecksum() (isChunkChecksumEq
 		return false, duration, targetResultStruct.err
 	}
 	sourceResult, targetResult := sourceResultStruct.result, targetResultStruct.result
+	ctx.lastSourceChecksum = checksumSummary(sourceResult)
+	ctx.lastTargetChecksum = checksumSummary(targetResult)
 
 	if reflect.DeepEqual(sourceResult, targetResult) {
 		return true, duration, nil

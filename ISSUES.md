@@ -133,10 +133,10 @@ Status legend: `[ ]` open · `[x]` fixed · `[~]` documented / deferred
 
 ## Deferred / known limitations (documented, not fixed here)
 
-- [~] **K1. Stub/unwired packages**: `pkg/tracking`, `pkg/monitoring`,
-  `pkg/resume`, `pkg/timerange`, `pkg/logic` (compatibility shims) compile but
-  are not reachable from the CLI. Left in place for future work; README no
-  longer advertises them.
+- [~] **K1. Stub/unwired packages**: `pkg/monitoring` (empty HTTP handler
+  stubs), `pkg/timerange`, `pkg/logic` (compatibility shims) compile but are
+  not reachable from the CLI. Left in place for future work. `pkg/tracking`
+  and `pkg/resume` were wired into the CLI by N3 and are no longer stubs.
 - [~] **K2. Mismatch retry cost**: a genuinely different chunk is retried
   `--default-retries` times with 1s sleeps before being reported (intended to
   ride out replication lag). Consider a dedicated `--recheck-interval` later.
@@ -161,3 +161,21 @@ Status legend: `[ ]` open · `[x]` fixed · `[~]` documented / deferred
   DSN), checksum logic (ordered-subset check, time-range iteration/final-chunk
   bounds, sample capping), and the sync CLI's file parser (REPLACE-only
   validation, comment/blank handling, line numbers). Run with `make test`.
+- [x] **N3. Persistent tracking + resume (pt-table-checksum style)** — wired
+  the previously dormant `pkg/tracking` into the checksum flow behind
+  `--enable-tracking` / `--tracking-db-*` flags: the tracking database
+  (default `data_checksum_tracking`, stored on the target unless overridden)
+  is auto-created from an embedded copy of `schema/tracking_schema.sql`, and
+  the run records job / per-table / per-chunk results plus, with
+  `--enable-differential-reporting`, per-record diffs into
+  `difference_details`. `--resume-job-id` re-checks only the pending tables
+  of an interrupted job (per table, not per chunk) via the rewritten
+  `pkg/resume` loader. Tracking write failures warn and never fail the run;
+  setup failures are fatal. Also fixed en route: `job_id` generation
+  (same-second collision + VARCHAR(64) overflow with long hostnames),
+  `RecordChunkComparison`'s status derivation (wrong under
+  `--is-superset-as-equal`, couldn't express errors — status now passed
+  explicitly), and removed the never-written `ChunkTracker`/`ChunkProgress`
+  scaffolding from `ChecksumContext` in favor of real persistence.
+  `DataChecksumByCount` now surfaces the row counts it already computed so
+  they land in `table_comparisons`.

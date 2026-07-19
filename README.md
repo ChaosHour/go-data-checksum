@@ -52,6 +52,8 @@ go build -o bin/go-data-sync cmd/sync/main.go
         Default number of retries for various operations before panicking (default 10)
   -enable-differential-reporting
         Enable detailed differential reporting showing which records differ by primary key (default false)
+  -enable-tracking
+        Persist job/table/chunk results to a tracking database (pt-table-checksum style).
   -generate-sync-sql
         Generate REPLACE INTO statements for synchronizing differences to a file
   -ignore-row-count-check
@@ -64,6 +66,8 @@ go build -o bin/go-data-sync cmd/sync/main.go
         Maximum number of differences to display in output (default: 10) (default 10)
   -max-sample-differences int
         Maximum number of sample differences to collect during analysis (default: 100) (default 100)
+  -resume-job-id string
+        Resume a previous tracked job by job_id (implies --enable-tracking).
   -source-db-host string
         Source MySQL hostname (default "127.0.0.1")
   -source-db-name string
@@ -110,6 +114,16 @@ go build -o bin/go-data-sync cmd/sync/main.go
         Parallel threads of table checksum. (default 1)
   -time-range-per-step duration
         time range per step for specified time column check,default 5m,eg:1h/2m/3s/4ms (default 5m0s)
+  -tracking-db-host string
+        Tracking MySQL hostname (default: target-db-host).
+  -tracking-db-name string
+        Tracking database name; auto-created if missing. (default "data_checksum_tracking")
+  -tracking-db-password string
+        Tracking MySQL password (default: target-db-password).
+  -tracking-db-port int
+        Tracking MySQL port (default: target-db-port).
+  -tracking-db-user string
+        Tracking MySQL user (default: target-db-user).
   -version
         Print version & exit
 ```
@@ -340,6 +354,107 @@ REPLACE INTO `target_db`.`users` (`id`, `name`, `email`, `created_at`) VALUES (7
    REPLACE INTO statements and applies them in transactional batches
    (see "COMPANION CLI: go-data-sync" below and EXAMPLES #3 for the full
    find → review → sync → re-verify workflow)
+
+
+## RESULT TRACKING (pt-table-checksum style)
+
+### Overview
+
+With `--enable-tracking`, every run persists its results to a MySQL tracking
+database — the same idea as pt-table-checksum's `percona.checksums` table, but
+without the replication-replay mechanism (this tool always connects to both
+servers directly). You get:
+
+- **History**: "when did these servers last verify clean?" is a SQL query
+- **Per-chunk detail**: which key ranges differed, with both checksums
+- **Per-record diffs**: with `--enable-differential-reporting`, each sampled
+  differing record's primary key and diff type is stored permanently
+- **Resume**: a killed run can be resumed by job id, re-checking only the
+  tables that never finished
+
+Tracking is fully opt-in and fail-safe: without the flag no tracking
+connection is ever opened, and if a tracking write fails mid-run the checksum
+continues and only logs a warning.
+
+### Where results are stored
+
+By default the tracking database `data_checksum_tracking` is auto-created on
+the **target** server (writing to a production source is deliberately
+avoided). Use the `--tracking-db-*` flags to store it anywhere else, e.g. a
+dedicated admin instance. The user needs `CREATE` on the first run only;
+afterwards `INSERT`/`UPDATE`/`SELECT` on the tracking database suffices.
+A reference copy of the DDL is in `schema/tracking_schema.sql` for manual
+installs or permission-restricted environments.
+
+### Schema
+
+| Table | One row per | Notable columns |
+|---|---|---|
+| `checksum_jobs` | run (job) | `job_id`, source/target host, status, table tallies |
+| `table_comparisons` | table pair | status, row counts, chunk tallies, error message |
+| `chunk_comparisons` | chunk checked | key range (JSON), both checksums, status, duration |
+| `difference_details` | sampled differing record | primary key (JSON), diff type, both checksums |
+
+Status mapping: a table or chunk is `equal`, `different`, or `error` (an error
+takes precedence over the comparison result). A job flips from `running` to
+`completed` when the run finishes; a job that stays `running` was interrupted
+and can be resumed.
+
+Note: like the normal check, the chunk loop stops at the **first unequal
+chunk** of a table (unlike pt-table-checksum, which always scans all chunks).
+Chunk rows therefore cover chunks up to and including the first difference.
+In time-column mode row counts are not collected (stored as NULL).
+
+### Example: tracked run
+
+```bash
+./bin/go-data-checksum \
+  --source-db-host="127.0.0.1" --source-db-port=3306 \
+  --source-db-user="checker"   --source-db-password="xxxx" \
+  --target-db-host="127.0.0.1" --target-db-port=3307 \
+  --target-db-user="checker"   --target-db-password="xxxx" \
+  --source-db-name="app_db" \
+  --enable-tracking --enable-differential-reporting
+# log line to note:
+#   Tracking enabled, job_id=127.0.0.1:3306_127.0.0.1:3307_1752940000_a1b2c3d4 ...
+```
+
+Then query the results (on the target, 3307 in this example):
+
+```sql
+-- Recent jobs
+SELECT job_id, status, total_tables, tables_equal, tables_different
+  FROM data_checksum_tracking.checksum_jobs ORDER BY start_time DESC LIMIT 10;
+
+-- Which tables of a job were not clean?
+SELECT source_database, source_table, status, source_row_count, target_row_count
+  FROM data_checksum_tracking.table_comparisons
+ WHERE job_id = '<job_id>' AND status <> 'equal';
+
+-- Exactly which records drifted (needs --enable-differential-reporting)?
+SELECT d.difference_type, d.primary_key_values
+  FROM data_checksum_tracking.difference_details d
+  JOIN data_checksum_tracking.chunk_comparisons  c USING (chunk_id)
+  JOIN data_checksum_tracking.table_comparisons  t USING (comparison_id)
+ WHERE t.job_id = '<job_id>';
+```
+
+### Resuming an interrupted job
+
+If a run dies (Ctrl-C, network, crash), its job stays `running` and the
+unfinished tables stay `pending`/`running`. Re-run with the same connection
+flags plus the job id:
+
+```bash
+./bin/go-data-checksum \
+  --source-db-host="127.0.0.1" --source-db-port=3306 ... \
+  --target-db-host="127.0.0.1" --target-db-port=3307 ... \
+  --resume-job-id="<job_id>"
+```
+
+Only the tables that never completed are re-checked (each from its beginning —
+resume is per table, not per chunk), their existing rows are updated in place,
+and the job is finalized from the aggregated table results.
 
 
 ## TEST
