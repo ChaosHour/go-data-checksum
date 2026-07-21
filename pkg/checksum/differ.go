@@ -496,25 +496,40 @@ func (td *TableDiffer) generateSyncSQL(report *DifferenceReport) error {
 		report.SourceOnlyRecords, report.TargetOnlyRecords, report.ModifiedRecords))
 
 	sqlCount := 0
+	var syncableDiffs []RecordDifference
 	for _, diff := range report.SampleDifferences {
-		// Only generate REPLACE INTO for source_only and modified records
-		// For target_only, we would need DELETE statements (skipping for safety)
-		if diff.DifferenceType == "target_only" {
-			continue
+		if diff.DifferenceType != "target_only" {
+			syncableDiffs = append(syncableDiffs, diff)
 		}
+	}
 
-		// Fetch full row data for this record
-		rowData, err := td.fetchFullRowData(diff.PrimaryKeyValues, allColumns)
-		if err != nil {
-			ctx.Context.Log.Warnf("Failed to fetch full row data for PK %s: %v", formatPrimaryKeyMap(diff.PrimaryKeyValues), err)
-			continue
+	if len(syncableDiffs) > 0 {
+		batchSize := 1000
+		for i := 0; i < len(syncableDiffs); i += batchSize {
+			end := i + batchSize
+			if end > len(syncableDiffs) {
+				end = len(syncableDiffs)
+			}
+			batch := syncableDiffs[i:end]
+
+			pkBatch := make([]map[string]interface{}, len(batch))
+			for j, diff := range batch {
+				pkBatch[j] = diff.PrimaryKeyValues
+			}
+
+			rowsData, err := td.fetchFullRowDataBatch(pkBatch, allColumns)
+			if err != nil {
+				ctx.Context.Log.Warnf("Failed to fetch batch of full row data (batch size %d): %v", len(batch), err)
+				continue
+			}
+
+			for _, rowData := range rowsData {
+				replaceStmt := td.buildReplaceIntoStatement(rowData, allColumns)
+				output.WriteString(replaceStmt)
+				output.WriteString("\n")
+				sqlCount++
+			}
 		}
-
-		// Generate REPLACE INTO statement
-		replaceStmt := td.buildReplaceIntoStatement(rowData, allColumns)
-		output.WriteString(replaceStmt)
-		output.WriteString("\n")
-		sqlCount++
 	}
 
 	output.WriteString(fmt.Sprintf("\n-- Total REPLACE INTO statements generated: %d\n", sqlCount))
@@ -600,6 +615,89 @@ func (td *TableDiffer) fetchFullRowData(pkValues map[string]interface{}, columns
 	}
 
 	return result, nil
+}
+
+// fetchFullRowDataBatch retrieves complete row data for a batch of primary keys in a single query
+func (td *TableDiffer) fetchFullRowDataBatch(pkBatch []map[string]interface{}, columns *types.ColumnList) ([]map[string]interface{}, error) {
+	ctx := td.Context
+	if len(pkBatch) == 0 {
+		return nil, nil
+	}
+
+	pkCols := ctx.UniqueKey.Columns()
+	numCols := len(pkCols)
+
+	columnNames := columns.Names()
+	escapedColumns := make([]string, len(columnNames))
+	for i, col := range columnNames {
+		escapedColumns[i] = types.EscapeName(col)
+	}
+
+	var whereClause string
+	var args []interface{}
+
+	if numCols == 1 {
+		pkCol := pkCols[0]
+		placeholders := make([]string, len(pkBatch))
+		for i, pk := range pkBatch {
+			placeholders[i] = "?"
+			args = append(args, pk[pkCol.Name])
+		}
+		whereClause = fmt.Sprintf("%s IN (%s)", types.EscapeName(pkCol.Name), strings.Join(placeholders, ", "))
+	} else {
+		escapedPkColNames := make([]string, numCols)
+		for i, col := range pkCols {
+			escapedPkColNames[i] = types.EscapeName(col.Name)
+		}
+
+		rowPlaceholders := make([]string, len(pkBatch))
+		for i, pk := range pkBatch {
+			vals := make([]string, numCols)
+			for j, col := range pkCols {
+				vals[j] = "?"
+				args = append(args, pk[col.Name])
+			}
+			rowPlaceholders[i] = fmt.Sprintf("(%s)", strings.Join(vals, ", "))
+		}
+		whereClause = fmt.Sprintf("(%s) IN (%s)", strings.Join(escapedPkColNames, ", "), strings.Join(rowPlaceholders, ", "))
+	}
+
+	query := fmt.Sprintf("SELECT %s FROM %s.%s WHERE %s",
+		strings.Join(escapedColumns, ", "),
+		types.EscapeName(ctx.PerTableContext.SourceDatabaseName),
+		types.EscapeName(ctx.PerTableContext.SourceTableName),
+		whereClause)
+
+	rows, err := ctx.Context.SourceDB.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var results []map[string]interface{}
+	for rows.Next() {
+		scanDest := make([]interface{}, len(columnNames))
+		scanPtrs := make([]interface{}, len(columnNames))
+		for i := range scanDest {
+			scanPtrs[i] = &scanDest[i]
+		}
+
+		if err := rows.Scan(scanPtrs...); err != nil {
+			return nil, err
+		}
+
+		rowMap := make(map[string]interface{})
+		for i, colName := range columnNames {
+			rowMap[colName] = scanDest[i]
+		}
+		results = append(results, rowMap)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	return results, nil
 }
 
 // buildReplaceIntoStatement generates a REPLACE INTO statement for the given row data
