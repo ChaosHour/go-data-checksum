@@ -31,6 +31,12 @@ vendor/
 # Log files
 *.log
 
+# sql files
+*.sql
+
+# ignore anything in bin
+/bin/
+
 # Build artifacts
 build/
 dist/

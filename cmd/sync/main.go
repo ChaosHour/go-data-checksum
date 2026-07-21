@@ -139,6 +139,9 @@ func main() {
 	timeout := flag.Int("conn-db-timeout", 60, "connect db timeout in seconds")
 	execute := flag.Bool("execute", false, "Actually apply the statements. Without this flag the tool runs in dry-run mode.")
 	batchSize := flag.Int("batch-size", 100, "Number of statements per transaction")
+	skipBinlog := flag.Bool("skip-binlog", false, "Set @@session.sql_log_bin = 0 on target connection")
+	skipFK := flag.Bool("skip-fk-checks", false, "Set @@session.foreign_key_checks = 0 on target connection")
+	skipUnique := flag.Bool("skip-unique-checks", false, "Set @@session.unique_checks = 0 on target connection")
 	version := flag.Bool("version", false, "Print version & exit")
 	flag.Parse()
 
@@ -200,6 +203,27 @@ func main() {
 	}
 
 	fmt.Printf("Applying %d statements to %s:%d (batch size %d)...\n", len(statements), *host, *port, *batchSize)
+
+	// Apply session optimizations if requested
+	if *skipBinlog {
+		if _, err := db.Exec("SET @@session.sql_log_bin = 0;"); err != nil {
+			fail("failed to disable binary logging: %v (does your user have SYSTEM_VARIABLES_ADMIN/SUPER?)", err)
+		}
+		fmt.Println("Session binary logging disabled.")
+	}
+	if *skipUnique {
+		if _, err := db.Exec("SET @@session.unique_checks = 0;"); err != nil {
+			fail("failed to disable unique checks: %v", err)
+		}
+		fmt.Println("Session unique checks disabled.")
+	}
+	if *skipFK {
+		if _, err := db.Exec("SET @@session.foreign_key_checks = 0;"); err != nil {
+			fail("failed to disable foreign key checks: %v", err)
+		}
+		fmt.Println("Session foreign key checks disabled.")
+	}
+
 	if err := apply(db, statements, *batchSize); err != nil {
 		fail("%v", err)
 	}
