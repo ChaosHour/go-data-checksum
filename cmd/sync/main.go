@@ -18,8 +18,12 @@ import (
 	"os"
 	"regexp"
 	"strings"
+	"sync"
+	"sync/atomic"
+	"syscall" // For checking EPIPE
 	"time"
 
+	"github.com/go-sql-driver/mysql"
 	_ "github.com/go-sql-driver/mysql"
 )
 
@@ -86,48 +90,146 @@ func summarize(statements []syncStatement) {
 	}
 }
 
-func apply(db *gosql.DB, statements []syncStatement, batchSize int) error {
+func apply(db *gosql.DB, statements []syncStatement, batchSize int, threads int, maxRetries int, retryDelay time.Duration) error {
 	startTime := time.Now()
-	applied := 0
+	var applied int64
 	inserted := int64(0)
 	replaced := int64(0)
 
-	for batchStart := 0; batchStart < len(statements); batchStart += batchSize {
-		batchEnd := batchStart + batchSize
-		if batchEnd > len(statements) {
-			batchEnd = len(statements)
-		}
-		batch := statements[batchStart:batchEnd]
+	type batchJob struct {
+		records []syncStatement
+	}
 
-		trx, err := db.Begin()
-		if err != nil {
-			return fmt.Errorf("failed to begin transaction: %v", err)
+	numStatements := len(statements)
+	jobsChan := make(chan batchJob, (numStatements/batchSize)+1)
+	for batchStart := 0; batchStart < numStatements; batchStart += batchSize {
+		batchEnd := batchStart + batchSize
+		if batchEnd > numStatements {
+			batchEnd = numStatements
 		}
-		for _, stmt := range batch {
-			result, err := trx.Exec(stmt.sql)
-			if err != nil {
-				trx.Rollback()
-				return fmt.Errorf("statement at line %d failed (batch rolled back, %d statements applied so far): %v",
-					stmt.lineNumber, applied, err)
+		jobsChan <- batchJob{records: statements[batchStart:batchEnd]}
+	}
+	close(jobsChan)
+
+	if threads > (numStatements/batchSize)+1 {
+		threads = (numStatements / batchSize) + 1
+	}
+	if threads < 1 {
+		threads = 1
+	}
+
+	var wg sync.WaitGroup
+	var once sync.Once
+	var firstErr error
+	setFirstErr := func(err error) {
+		once.Do(func() {
+			firstErr = err
+		})
+	}
+
+	for i := 0; i < threads; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for job := range jobsChan {
+				// Retry loop for the entire batch
+				for attempt := 0; attempt <= maxRetries; attempt++ {
+					if firstErr != nil { // Check if another goroutine already failed
+						return
+					}
+
+					if attempt > 0 {
+						fmt.Printf("Retrying batch for statements %d-%d (attempt %d/%d)...\n", job.records[0].lineNumber, job.records[len(job.records)-1].lineNumber, attempt, maxRetries)
+						time.Sleep(retryDelay)
+					}
+
+					trx, err := db.Begin()
+					if err != nil {
+						setFirstErr(fmt.Errorf("failed to begin transaction for batch starting at line %d: %v", job.records[0].lineNumber, err))
+						return
+					}
+
+					var batchFailed bool
+					var localReplaced, localInserted int64
+					for _, stmt := range job.records {
+						result, err := trx.Exec(stmt.sql)
+						if err != nil {
+							trx.Rollback()
+							// Check for retryable errors.
+							// ER_NO_SUCH_TABLE (1146) is retryable if it's transient (e.g., DDL interference).
+							// ER_LOCK_DEADLOCK (1213) and ER_LOCK_WAIT_TIMEOUT (1205) are common retryable errors.
+							// EPIPE (broken pipe) can indicate a lost connection.
+							if isRetryableError(err) && attempt < maxRetries {
+								batchFailed = true
+								break // Break from inner loop, retry outer loop (the batch)
+							} else {
+								setFirstErr(fmt.Errorf("statement at line %d failed (batch rolled back): %v", stmt.lineNumber, err))
+								return
+							}
+						}
+						if rowsAffected, err := result.RowsAffected(); err == nil && rowsAffected >= 2 {
+							localReplaced++
+						} else {
+							localInserted++
+						}
+					}
+
+					if batchFailed {
+						continue // Retry the current batch
+					}
+
+					if err := trx.Commit(); err != nil {
+						if isRetryableError(err) && attempt < maxRetries { // Commit can also fail transiently
+							batchFailed = true
+							continue // Retry the current batch
+						}
+						setFirstErr(fmt.Errorf("failed to commit batch ending at line %d: %v", job.records[len(job.records)-1].lineNumber, err))
+						return
+					}
+
+					// If we reached here, the batch was successful, break retry loop
+					atomic.AddInt64(&replaced, localReplaced)
+					atomic.AddInt64(&inserted, localInserted)
+					currentApplied := atomic.AddInt64(&applied, int64(len(job.records)))
+					previousApplied := currentApplied - int64(len(job.records))
+
+					crossedBoundary := (currentApplied / 10000) > (previousApplied / 10000)
+					isLast := currentApplied == int64(numStatements)
+					if (crossedBoundary && !isLast) || isLast {
+						fmt.Printf("Applied %d/%d statements...\n", currentApplied, numStatements)
+					}
+					break // Batch successful, move to next job
+				}
 			}
-			// REPLACE reports 1 row affected for a plain insert and 2 for
-			// delete+insert of an existing row.
-			if rowsAffected, err := result.RowsAffected(); err == nil && rowsAffected >= 2 {
-				replaced++
-			} else {
-				inserted++
-			}
-		}
-		if err := trx.Commit(); err != nil {
-			return fmt.Errorf("failed to commit batch ending at line %d: %v", batch[len(batch)-1].lineNumber, err)
-		}
-		applied += len(batch)
-		fmt.Printf("Applied %d/%d statements...\n", applied, len(statements))
+		}()
+	}
+	wg.Wait()
+
+	if firstErr != nil {
+		return firstErr
 	}
 
 	fmt.Printf("Done: %d statements applied in %v (%d rows inserted, %d rows replaced).\n",
 		applied, time.Since(startTime).Round(time.Millisecond), inserted, replaced)
 	return nil
+}
+
+// isRetryableError checks if the given error is transient and should trigger a retry.
+func isRetryableError(err error) bool {
+	if err == nil {
+		return false
+	}
+	// Check for MySQL specific errors
+	if mysqlErr, ok := err.(*mysql.MySQLError); ok {
+		switch mysqlErr.Number {
+		case 1146, // ER_NO_SUCH_TABLE - can be transient if DDL is happening
+			1205, // ER_LOCK_WAIT_TIMEOUT
+			1213: // ER_LOCK_DEADLOCK
+			return true
+		}
+	}
+	// Check for network errors like broken pipe
+	return strings.Contains(err.Error(), syscall.EPIPE.Error())
 }
 
 func main() {
@@ -139,6 +241,9 @@ func main() {
 	timeout := flag.Int("conn-db-timeout", 60, "connect db timeout in seconds")
 	execute := flag.Bool("execute", false, "Actually apply the statements. Without this flag the tool runs in dry-run mode.")
 	batchSize := flag.Int("batch-size", 100, "Number of statements per transaction")
+	threads := flag.Int("threads", 4, "Number of concurrent threads to apply statements")
+	maxRetries := flag.Int("max-retries", 0, "Maximum number of times to retry a failed batch (default 0, no retries)")
+	retryDelay := flag.Duration("retry-delay", 1*time.Second, "Delay between retries for a failed batch")
 	skipBinlog := flag.Bool("skip-binlog", false, "Set @@session.sql_log_bin = 0 on target connection")
 	skipFK := flag.Bool("skip-fk-checks", false, "Set @@session.foreign_key_checks = 0 on target connection")
 	skipUnique := flag.Bool("skip-unique-checks", false, "Set @@session.unique_checks = 0 on target connection")
@@ -202,7 +307,10 @@ func main() {
 		fail("cannot connect to target %s:%d: %v", *host, *port, err)
 	}
 
-	fmt.Printf("Applying %d statements to %s:%d (batch size %d)...\n", len(statements), *host, *port, *batchSize)
+	db.SetMaxOpenConns(*threads + 2)
+	db.SetMaxIdleConns(*threads + 2)
+
+	fmt.Printf("Applying %d statements to %s:%d (batch size %d, threads %d)...\n", len(statements), *host, *port, *batchSize, *threads)
 
 	// Apply session optimizations if requested
 	if *skipBinlog {
@@ -224,7 +332,7 @@ func main() {
 		fmt.Println("Session foreign key checks disabled.")
 	}
 
-	if err := apply(db, statements, *batchSize); err != nil {
+	if err := apply(db, statements, *batchSize, *threads, *maxRetries, *retryDelay); err != nil {
 		fail("%v", err)
 	}
 }
