@@ -299,9 +299,7 @@ func TestRecordDifference_PrimaryKeyTypes(t *testing.T) {
 
 // TestDifferenceReport_Aggregation tests report aggregation across chunks
 func TestDifferenceReport_Aggregation(t *testing.T) {
-	report := &DifferenceReport{
-		SampleDifferences: make([]RecordDifference, 0),
-	}
+	report := &DifferenceReport{}
 
 	// Simulate processing 3 chunks
 	chunks := []struct {
@@ -469,6 +467,7 @@ func TestFormatValueForSQL(t *testing.T) {
 		{"bool false", false, "0"},
 		{"datetime", time.Date(2025, 1, 15, 10, 0, 0, 0, time.UTC), "'2025-01-15 10:00:00'"},
 		{"datetime with microseconds", time.Date(2025, 1, 15, 10, 0, 0, 123456000, time.UTC), "'2025-01-15 10:00:00.123456'"},
+		{"zero datetime", time.Time{}, "'0000-00-00 00:00:00'"},
 	}
 
 	for _, tt := range tests {

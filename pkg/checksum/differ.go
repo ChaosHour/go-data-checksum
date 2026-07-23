@@ -568,55 +568,6 @@ func formatPrimaryKeyMap(pkValues map[string]interface{}) string {
 	return strings.Join(parts, ", ")
 }
 
-// fetchFullRowData retrieves the complete row data for a given primary key
-func (td *TableDiffer) fetchFullRowData(pkValues map[string]interface{}, columns *types.ColumnList) (map[string]interface{}, error) {
-	ctx := td.Context
-
-	// Build WHERE clause for primary key
-	whereClause := make([]string, 0, len(pkValues))
-	args := make([]interface{}, 0, len(pkValues))
-
-	for _, pkCol := range ctx.UniqueKey.Columns() {
-		whereClause = append(whereClause, fmt.Sprintf("%s = ?", types.EscapeName(pkCol.Name)))
-		args = append(args, pkValues[pkCol.Name])
-	}
-
-	// Build SELECT query for all columns
-	columnNames := columns.Names()
-	escapedColumns := make([]string, len(columnNames))
-	for i, col := range columnNames {
-		escapedColumns[i] = types.EscapeName(col)
-	}
-
-	query := fmt.Sprintf("SELECT %s FROM %s.%s WHERE %s",
-		strings.Join(escapedColumns, ", "),
-		types.EscapeName(ctx.PerTableContext.SourceDatabaseName),
-		types.EscapeName(ctx.PerTableContext.SourceTableName),
-		strings.Join(whereClause, " AND "))
-
-	// Execute query
-	row := ctx.Context.SourceDB.QueryRow(query, args...)
-
-	// Prepare scan destinations
-	scanDest := make([]interface{}, len(columnNames))
-	scanPtrs := make([]interface{}, len(columnNames))
-	for i := range scanDest {
-		scanPtrs[i] = &scanDest[i]
-	}
-
-	if err := row.Scan(scanPtrs...); err != nil {
-		return nil, fmt.Errorf("failed to scan row: %v", err)
-	}
-
-	// Build result map
-	result := make(map[string]interface{})
-	for i, colName := range columnNames {
-		result[colName] = scanDest[i]
-	}
-
-	return result, nil
-}
-
 // fetchFullRowDataBatch retrieves complete row data for a batch of primary keys in a single query
 func (td *TableDiffer) fetchFullRowDataBatch(pkBatch []map[string]interface{}, columns *types.ColumnList) ([]map[string]interface{}, error) {
 	ctx := td.Context
@@ -762,6 +713,9 @@ func (td *TableDiffer) formatValueForSQL(value interface{}) string {
 		}
 		return "0"
 	case time.Time:
+		if v.IsZero() {
+			return "'0000-00-00 00:00:00'"
+		}
 		// DATETIME/TIMESTAMP columns scan as time.Time because the DSN sets
 		// parseTime=true; render them in MySQL literal format.
 		return fmt.Sprintf("'%s'", v.Format("2006-01-02 15:04:05.999999"))
