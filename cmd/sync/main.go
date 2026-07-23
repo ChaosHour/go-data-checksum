@@ -247,6 +247,7 @@ func main() {
 	skipBinlog := flag.Bool("skip-binlog", false, "Set @@session.sql_log_bin = 0 on target connection")
 	skipFK := flag.Bool("skip-fk-checks", false, "Set @@session.foreign_key_checks = 0 on target connection")
 	skipUnique := flag.Bool("skip-unique-checks", false, "Set @@session.unique_checks = 0 on target connection")
+	noAutoValueOnZero := flag.Bool("no-auto-value-on-zero", false, "Set @@session.sql_mode = 'NO_AUTO_VALUE_ON_ZERO' on target connection")
 	version := flag.Bool("version", false, "Print version & exit")
 	flag.Parse()
 
@@ -298,6 +299,18 @@ func main() {
 	// Statements are fully qualified (`db`.`table`), so no default schema is needed.
 	dsn := fmt.Sprintf("%s:%s@tcp(%s:%d)/?timeout=%ds&readTimeout=%ds&writeTimeout=%ds&charset=utf8mb4",
 		*user, *password, *host, *port, *timeout, *timeout, *timeout)
+	if *skipFK {
+		dsn += "&foreign_key_checks=0"
+	}
+	if *skipUnique {
+		dsn += "&unique_checks=0"
+	}
+	if *skipBinlog {
+		dsn += "&sql_log_bin=0"
+	}
+	if *noAutoValueOnZero {
+		dsn += "&sql_mode=%27NO_AUTO_VALUE_ON_ZERO%27"
+	}
 	db, err := gosql.Open("mysql", dsn)
 	if err != nil {
 		fail("cannot open target connection: %v", err)
@@ -311,26 +324,6 @@ func main() {
 	db.SetMaxIdleConns(*threads + 2)
 
 	fmt.Printf("Applying %d statements to %s:%d (batch size %d, threads %d)...\n", len(statements), *host, *port, *batchSize, *threads)
-
-	// Apply session optimizations if requested
-	if *skipBinlog {
-		if _, err := db.Exec("SET @@session.sql_log_bin = 0;"); err != nil {
-			fail("failed to disable binary logging: %v (does your user have SYSTEM_VARIABLES_ADMIN/SUPER?)", err)
-		}
-		fmt.Println("Session binary logging disabled.")
-	}
-	if *skipUnique {
-		if _, err := db.Exec("SET @@session.unique_checks = 0;"); err != nil {
-			fail("failed to disable unique checks: %v", err)
-		}
-		fmt.Println("Session unique checks disabled.")
-	}
-	if *skipFK {
-		if _, err := db.Exec("SET @@session.foreign_key_checks = 0;"); err != nil {
-			fail("failed to disable foreign key checks: %v", err)
-		}
-		fmt.Println("Session foreign key checks disabled.")
-	}
 
 	if err := apply(db, statements, *batchSize, *threads, *maxRetries, *retryDelay); err != nil {
 		fail("%v", err)

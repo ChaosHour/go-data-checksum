@@ -31,6 +31,9 @@ vendor/
 # Log files
 *.log
 
+# txt files
+*.txt
+
 # sql files
 *.sql
 
