@@ -739,3 +739,47 @@ go-data-checksum is a high-performance MySQL database/table data verification to
 - **Optimized Query Execution**: Smart query building for maximum performance
 
 This tool is designed for database administrators, DevOps engineers, and data engineers who need to ensure data consistency across MySQL environments, validate replication accuracy, and maintain data integrity in distributed database systems.
+
+
+## Actual example of usage to sync data from primary to replica
+
+```bash
+Check for data mismatches:
+./bin/go-data-checksum \
+       --source-db-host="${SOURCE_HOST}" --source-db-port=3306 \
+       --source-db-user="${DB_USER}" --source-db-password="${SOURCE_DB_PASS}" \
+       --target-db-host="${TARGET_HOST}" --target-db-port=3306 \
+       --target-db-user="${DB_USER}" --target-db-password="${TARGET_DB_PASS}" \
+       --source-db-name="${DB_NAME}" --source-table-name="${SOURCE_TB_NAME}" \
+       --enable-differential-reporting \
+       --threads=4
+
+
+Create the sync file:
+./bin/go-data-checksum \
+   --source-db-host="${SOURCE_HOST}" --source-db-port=3306 \
+   --source-db-user="${DB_USER}"   --source-db-password="${SOURCE_DB_PASS}" \
+   --target-db-host="${TARGET_HOST}" --target-db-port=3306 \
+   --target-db-user="${DB_USER}"   --target-db-password="${TARGET_DB_PASS}" \
+   --source-db-name="${DB_NAME}" --source-table-name="${SOURCE_TB_NAME}" \
+   --enable-differential-reporting \
+   --generate-sync-sql \
+   --sync-sql-file="sync_file.sql" \
+   --max-sample-differences=60 \
+   --threads=4
+
+
+Apply the sync file:
+./bin/go-data-sync \
+  --sql-file="sync_file.sql" \
+  --target-db-host="${TARGET_HOST}" \
+  --target-db-port=3306 \
+  --target-db-user="${DB_USER}" \
+  --target-db-password="${TARGET_DB_PASS}" \
+  --skip-binlog \
+  --skip-fk-checks \
+  --skip-unique-checks \
+  --no-auto-value-on-zero \
+  --execute
+
+```
