@@ -743,7 +743,7 @@ This tool is designed for database administrators, DevOps engineers, and data en
 
 ## Actual example of usage to sync data from primary to replica
 
-```bash
+
 ### 1. Check for data mismatches
 
 **Option A: Command-line Flags**
