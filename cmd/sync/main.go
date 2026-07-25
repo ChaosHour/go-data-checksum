@@ -13,6 +13,7 @@ package main
 import (
 	"bufio"
 	gosql "database/sql"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
@@ -35,6 +36,94 @@ type syncStatement struct {
 	lineNumber int
 	table      string
 	sql        string
+}
+
+type SyncJSONConfig struct {
+	SQLFile           *string `json:"sql-file,omitempty"`
+	Host              *string `json:"target-db-host,omitempty"`
+	Port              *int    `json:"target-db-port,omitempty"`
+	User              *string `json:"target-db-user,omitempty"`
+	Password          *string `json:"target-db-password,omitempty"`
+	Timeout           *int    `json:"conn-db-timeout,omitempty"`
+	Execute           *bool   `json:"execute,omitempty"`
+	BatchSize         *int    `json:"batch-size,omitempty"`
+	Threads           *int    `json:"threads,omitempty"`
+	MaxRetries        *int    `json:"max-retries,omitempty"`
+	RetryDelay        *string `json:"retry-delay,omitempty"`
+	SkipBinlog        *bool   `json:"skip-binlog,omitempty"`
+	SkipFK            *bool   `json:"skip-fk-checks,omitempty"`
+	SkipUnique        *bool   `json:"skip-unique-checks,omitempty"`
+	NoAutoValueOnZero *bool   `json:"no-auto-value-on-zero,omitempty"`
+}
+
+func loadSyncConfig(path string, sqlFile, host, user, password *string, port, timeout *int, execute *bool, batchSize, threads, maxRetries *int, retryDelay *time.Duration, skipBinlog, skipFK, skipUnique, noAutoValueOnZero *bool) error {
+	file, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	var cfg SyncJSONConfig
+	if err := json.NewDecoder(file).Decode(&cfg); err != nil {
+		return err
+	}
+
+	seen := make(map[string]bool)
+	flag.Visit(func(f *flag.Flag) {
+		seen[f.Name] = true
+	})
+
+	if !seen["sql-file"] && cfg.SQLFile != nil {
+		*sqlFile = *cfg.SQLFile
+	}
+	if !seen["target-db-host"] && cfg.Host != nil {
+		*host = *cfg.Host
+	}
+	if !seen["target-db-port"] && cfg.Port != nil {
+		*port = *cfg.Port
+	}
+	if !seen["target-db-user"] && cfg.User != nil {
+		*user = *cfg.User
+	}
+	if !seen["target-db-password"] && cfg.Password != nil {
+		*password = *cfg.Password
+	}
+	if !seen["conn-db-timeout"] && cfg.Timeout != nil {
+		*timeout = *cfg.Timeout
+	}
+	if !seen["execute"] && cfg.Execute != nil {
+		*execute = *cfg.Execute
+	}
+	if !seen["batch-size"] && cfg.BatchSize != nil {
+		*batchSize = *cfg.BatchSize
+	}
+	if !seen["threads"] && cfg.Threads != nil {
+		*threads = *cfg.Threads
+	}
+	if !seen["max-retries"] && cfg.MaxRetries != nil {
+		*maxRetries = *cfg.MaxRetries
+	}
+	if !seen["retry-delay"] && cfg.RetryDelay != nil {
+		d, err := time.ParseDuration(*cfg.RetryDelay)
+		if err != nil {
+			return fmt.Errorf("invalid retry-delay %q: %v", *cfg.RetryDelay, err)
+		}
+		*retryDelay = d
+	}
+	if !seen["skip-binlog"] && cfg.SkipBinlog != nil {
+		*skipBinlog = *cfg.SkipBinlog
+	}
+	if !seen["skip-fk-checks"] && cfg.SkipFK != nil {
+		*skipFK = *cfg.SkipFK
+	}
+	if !seen["skip-unique-checks"] && cfg.SkipUnique != nil {
+		*skipUnique = *cfg.SkipUnique
+	}
+	if !seen["no-auto-value-on-zero"] && cfg.NoAutoValueOnZero != nil {
+		*noAutoValueOnZero = *cfg.NoAutoValueOnZero
+	}
+
+	return nil
 }
 
 func parseSyncFile(path string) ([]syncStatement, error) {
@@ -243,6 +332,7 @@ func main() {
 	batchSize := flag.Int("batch-size", 100, "Number of statements per transaction")
 	threads := flag.Int("threads", 4, "Number of concurrent threads to apply statements")
 	maxRetries := flag.Int("max-retries", 0, "Maximum number of times to retry a failed batch (default 0, no retries)")
+	configFile := flag.String("config", "", "Path to a JSON configuration file to load arguments from")
 	retryDelay := flag.Duration("retry-delay", 1*time.Second, "Delay between retries for a failed batch")
 	skipBinlog := flag.Bool("skip-binlog", false, "Set @@session.sql_log_bin = 0 on target connection")
 	skipFK := flag.Bool("skip-fk-checks", false, "Set @@session.foreign_key_checks = 0 on target connection")
@@ -258,6 +348,13 @@ func main() {
 		}
 		fmt.Println(appVersion)
 		return
+	}
+
+	if *configFile != "" {
+		if err := loadSyncConfig(*configFile, sqlFile, host, user, password, port, timeout, execute, batchSize, threads, maxRetries, retryDelay, skipBinlog, skipFK, skipUnique, noAutoValueOnZero); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: failed to load config file: %v\n", err)
+			os.Exit(1)
+		}
 	}
 
 	fail := func(format string, args ...interface{}) {

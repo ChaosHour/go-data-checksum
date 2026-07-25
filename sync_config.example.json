@@ -1,0 +1,17 @@
+{
+  "sql-file": "sync_file.sql",
+  "target-db-host": "127.0.0.1",
+  "target-db-port": 3307,
+  "target-db-user": "root",
+  "target-db-password": "s3cr3t_password",
+  "conn-db-timeout": 60,
+  "execute": false,
+  "batch-size": 100,
+  "threads": 4,
+  "max-retries": 3,
+  "retry-delay": "1s",
+  "skip-binlog": true,
+  "skip-fk-checks": true,
+  "skip-unique-checks": true,
+  "no-auto-value-on-zero": true
+}

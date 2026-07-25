@@ -744,7 +744,10 @@ This tool is designed for database administrators, DevOps engineers, and data en
 ## Actual example of usage to sync data from primary to replica
 
 ```bash
-Check for data mismatches:
+### 1. Check for data mismatches
+
+**Option A: Command-line Flags**
+```bash
 ./bin/go-data-checksum \
        --source-db-host="${SOURCE_HOST}" --source-db-port=3306 \
        --source-db-user="${DB_USER}" --source-db-password="${SOURCE_DB_PASS}" \
@@ -753,9 +756,20 @@ Check for data mismatches:
        --source-db-name="${DB_NAME}" --source-table-name="${SOURCE_TB_NAME}" \
        --enable-differential-reporting \
        --threads=4
+```
 
+**Option B: JSON Configuration**
+Copy `checksum_match_check.example.json` to `checksum_match_check.json`, edit your credentials and database targets, and run:
+```bash
+./bin/go-data-checksum --config="checksum_match_check.json"
+```
 
-Create the sync file:
+---
+
+### 2. Create the sync file
+
+**Option A: Command-line Flags**
+```bash
 ./bin/go-data-checksum \
    --source-db-host="${SOURCE_HOST}" --source-db-port=3306 \
    --source-db-user="${DB_USER}"   --source-db-password="${SOURCE_DB_PASS}" \
@@ -767,9 +781,20 @@ Create the sync file:
    --sync-sql-file="sync_file.sql" \
    --max-sample-differences=60 \
    --threads=4
+```
 
+**Option B: JSON Configuration**
+Copy `checksum_sync_generate.example.json` to `checksum_sync_generate.json`, edit your targets, and run:
+```bash
+./bin/go-data-checksum --config="checksum_sync_generate.json"
+```
 
-Apply the sync file:
+---
+
+### 3. Apply the sync file
+
+**Option A: Command-line Flags**
+```bash
 ./bin/go-data-sync \
   --sql-file="sync_file.sql" \
   --target-db-host="${TARGET_HOST}" \
@@ -781,5 +806,12 @@ Apply the sync file:
   --skip-unique-checks \
   --no-auto-value-on-zero \
   --execute
+```
+
+**Option B: JSON Configuration**
+Copy `sync_apply.example.json` to `sync_apply.json`, edit your target connection details, and run:
+```bash
+./bin/go-data-sync --config="sync_apply.json"
+```
 
 ```
