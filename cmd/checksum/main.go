@@ -6,6 +6,7 @@
 package main
 
 import (
+	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
@@ -41,7 +42,8 @@ func NewChecksumJob(threads int) *ChecksumJob {
 func GenerateTableList(baseContext *types.BaseContext) (err error) {
 	queryWithDatabase := func(databases []string, tablesRegexp string, hint string) (tablesList []string, err error) {
 		var query string
-		if hint == "QueryTableNameWithDatabase" {
+		switch hint {
+		case "QueryTableNameWithDatabase":
 			query = fmt.Sprintf(`
               select concat(table_schema, '.', table_name) as table_name
                 from information_schema.tables
@@ -49,7 +51,7 @@ func GenerateTableList(baseContext *types.BaseContext) (err error) {
                order by 1
             `, strings.Join(databases, "', '"),
 			)
-		} else if hint == "QueryTableNameWithRegexp" {
+		case "QueryTableNameWithRegexp":
 			query = fmt.Sprintf(`
               select concat(table_schema, '.', table_name) as table_name
                 from information_schema.tables
@@ -495,6 +497,202 @@ func (job *ChecksumJob) checksum(baseContext *types.BaseContext) {
 	}
 }
 
+type ChecksumJSONConfig struct {
+	SourceDBName                *string `json:"source-db-name,omitempty"`
+	SourceTableName             *string `json:"source-table-name,omitempty"`
+	TargetDBName                *string `json:"target-db-name,omitempty"`
+	TargetTableName             *string `json:"target-table-name,omitempty"`
+	TargetDatabaseAsSource      *bool   `json:"target-database-as-source,omitempty"`
+	TargetTableAsSource         *bool   `json:"target-table-as-source,omitempty"`
+	TargetDatabaseAddSuffix     *string `json:"target-database-add-suffix,omitempty"`
+	TargetTableAddSuffix        *string `json:"target-table-add-suffix,omitempty"`
+	SourceTableRegexp           *string `json:"source-table-regexp,omitempty"`
+	SourceDBHost                *string `json:"source-db-host,omitempty"`
+	SourceDBPort                *int    `json:"source-db-port,omitempty"`
+	SourceDBUser                *string `json:"source-db-user,omitempty"`
+	SourceDBPassword            *string `json:"source-db-password,omitempty"`
+	TargetDBHost                *string `json:"target-db-host,omitempty"`
+	TargetDBPort                *int    `json:"target-db-port,omitempty"`
+	TargetDBUser                *string `json:"target-db-user,omitempty"`
+	TargetDBPassword            *string `json:"target-db-password,omitempty"`
+	ConnDBTimeout               *int    `json:"conn-db-timeout,omitempty"`
+	CheckColumnNames            *string `json:"check-column-names,omitempty"`
+	SpecifiedTimeColumn         *string `json:"specified-time-column,omitempty"`
+	TimeRangePerStep            *string `json:"time-range-per-step,omitempty"`
+	SpecifiedTimeBegin          *string `json:"specified-time-begin,omitempty"`
+	SpecifiedTimeEnd            *string `json:"specified-time-end,omitempty"`
+	ChunkSize                   *int64  `json:"chunk-size,omitempty"`
+	DefaultRetries              *int64  `json:"default-retries,omitempty"`
+	EnableDifferentialReporting *bool   `json:"enable-differential-reporting,omitempty"`
+	MaxSampleDifferences        *int    `json:"max-sample-differences,omitempty"`
+	MaxDisplayDifferences       *int    `json:"max-display-differences,omitempty"`
+	GenerateSyncSQL             *bool   `json:"generate-sync-sql,omitempty"`
+	SyncSQLFile                 *string `json:"sync-sql-file,omitempty"`
+	IsSupersetAsEqual           *bool   `json:"is-superset-as-equal,omitempty"`
+	IgnoreRowCountCheck         *bool   `json:"ignore-row-count-check,omitempty"`
+	Threads                     *int    `json:"threads,omitempty"`
+	EnableTracking              *bool   `json:"enable-tracking,omitempty"`
+	TrackingDBHost              *string `json:"tracking-db-host,omitempty"`
+	TrackingDBPort              *int    `json:"tracking-db-port,omitempty"`
+	TrackingDBUser              *string `json:"tracking-db-user,omitempty"`
+	TrackingDBPassword          *string `json:"tracking-db-password,omitempty"`
+	TrackingDBName              *string `json:"tracking-db-name,omitempty"`
+	ResumeJobID                 *string `json:"resume-job-id,omitempty"`
+	Debug                       *bool   `json:"debug,omitempty"`
+	LogFile                     *string `json:"logfile,omitempty"`
+}
+
+func loadChecksumConfig(path string, baseContext *types.BaseContext, specifiedTimeBegin, specifiedTimeEnd *string, chunkSize, defaultRetries *int64, debug *bool, logFile *string) error {
+	file, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	var cfg ChecksumJSONConfig
+	if err := json.NewDecoder(file).Decode(&cfg); err != nil {
+		return err
+	}
+
+	seen := make(map[string]bool)
+	flag.Visit(func(f *flag.Flag) {
+		seen[f.Name] = true
+	})
+
+	if !seen["source-db-name"] && cfg.SourceDBName != nil {
+		baseContext.SourceDatabases = *cfg.SourceDBName
+	}
+	if !seen["source-table-name"] && cfg.SourceTableName != nil {
+		baseContext.SourceTables = *cfg.SourceTableName
+	}
+	if !seen["target-db-name"] && cfg.TargetDBName != nil {
+		baseContext.TargetDatabases = *cfg.TargetDBName
+	}
+	if !seen["target-table-name"] && cfg.TargetTableName != nil {
+		baseContext.TargetTables = *cfg.TargetTableName
+	}
+	if !seen["target-database-as-source"] && cfg.TargetDatabaseAsSource != nil {
+		baseContext.TargetDatabaseAsSource = *cfg.TargetDatabaseAsSource
+	}
+	if !seen["target-table-as-source"] && cfg.TargetTableAsSource != nil {
+		baseContext.TargetTableAsSource = *cfg.TargetTableAsSource
+	}
+	if !seen["target-database-add-suffix"] && cfg.TargetDatabaseAddSuffix != nil {
+		baseContext.TargetDatabaseAddSuffix = *cfg.TargetDatabaseAddSuffix
+	}
+	if !seen["target-table-add-suffix"] && cfg.TargetTableAddSuffix != nil {
+		baseContext.TargetTableAddSuffix = *cfg.TargetTableAddSuffix
+	}
+	if !seen["source-table-regexp"] && cfg.SourceTableRegexp != nil {
+		baseContext.SourceTableNameRegexp = *cfg.SourceTableRegexp
+	}
+	if !seen["source-db-host"] && cfg.SourceDBHost != nil {
+		baseContext.SourceDBHost = *cfg.SourceDBHost
+	}
+	if !seen["source-db-port"] && cfg.SourceDBPort != nil {
+		baseContext.SourceDBPort = *cfg.SourceDBPort
+	}
+	if !seen["source-db-user"] && cfg.SourceDBUser != nil {
+		baseContext.SourceDBUser = *cfg.SourceDBUser
+	}
+	if !seen["source-db-password"] && cfg.SourceDBPassword != nil {
+		baseContext.SourceDBPass = *cfg.SourceDBPassword
+	}
+	if !seen["target-db-host"] && cfg.TargetDBHost != nil {
+		baseContext.TargetDBHost = *cfg.TargetDBHost
+	}
+	if !seen["target-db-port"] && cfg.TargetDBPort != nil {
+		baseContext.TargetDBPort = *cfg.TargetDBPort
+	}
+	if !seen["target-db-user"] && cfg.TargetDBUser != nil {
+		baseContext.TargetDBUser = *cfg.TargetDBUser
+	}
+	if !seen["target-db-password"] && cfg.TargetDBPassword != nil {
+		baseContext.TargetDBPass = *cfg.TargetDBPassword
+	}
+	if !seen["conn-db-timeout"] && cfg.ConnDBTimeout != nil {
+		baseContext.Timeout = *cfg.ConnDBTimeout
+	}
+	if !seen["check-column-names"] && cfg.CheckColumnNames != nil {
+		baseContext.RequestedColumnNames = *cfg.CheckColumnNames
+	}
+	if !seen["specified-time-column"] && cfg.SpecifiedTimeColumn != nil {
+		baseContext.SpecifiedDatetimeColumn = *cfg.SpecifiedTimeColumn
+	}
+	if !seen["time-range-per-step"] && cfg.TimeRangePerStep != nil {
+		d, err := time.ParseDuration(*cfg.TimeRangePerStep)
+		if err != nil {
+			return fmt.Errorf("invalid time-range-per-step %q: %v", *cfg.TimeRangePerStep, err)
+		}
+		baseContext.SpecifiedTimeRangePerStep = d
+	}
+	if !seen["specified-time-begin"] && cfg.SpecifiedTimeBegin != nil {
+		*specifiedTimeBegin = *cfg.SpecifiedTimeBegin
+	}
+	if !seen["specified-time-end"] && cfg.SpecifiedTimeEnd != nil {
+		*specifiedTimeEnd = *cfg.SpecifiedTimeEnd
+	}
+	if !seen["chunk-size"] && cfg.ChunkSize != nil {
+		*chunkSize = *cfg.ChunkSize
+	}
+	if !seen["default-retries"] && cfg.DefaultRetries != nil {
+		*defaultRetries = *cfg.DefaultRetries
+	}
+	if !seen["enable-differential-reporting"] && cfg.EnableDifferentialReporting != nil {
+		baseContext.EnableDifferentialReporting = *cfg.EnableDifferentialReporting
+	}
+	if !seen["max-sample-differences"] && cfg.MaxSampleDifferences != nil {
+		baseContext.MaxSampleDifferences = *cfg.MaxSampleDifferences
+	}
+	if !seen["max-display-differences"] && cfg.MaxDisplayDifferences != nil {
+		baseContext.MaxDisplayDifferences = *cfg.MaxDisplayDifferences
+	}
+	if !seen["generate-sync-sql"] && cfg.GenerateSyncSQL != nil {
+		baseContext.GenerateSyncSQL = *cfg.GenerateSyncSQL
+	}
+	if !seen["sync-sql-file"] && cfg.SyncSQLFile != nil {
+		baseContext.SyncSQLFile = *cfg.SyncSQLFile
+	}
+	if !seen["is-superset-as-equal"] && cfg.IsSupersetAsEqual != nil {
+		baseContext.IsSuperSetAsEqual = *cfg.IsSupersetAsEqual
+	}
+	if !seen["ignore-row-count-check"] && cfg.IgnoreRowCountCheck != nil {
+		baseContext.IgnoreRowCountCheck = *cfg.IgnoreRowCountCheck
+	}
+	if !seen["threads"] && cfg.Threads != nil {
+		baseContext.ParallelThreads = *cfg.Threads
+	}
+	if !seen["enable-tracking"] && cfg.EnableTracking != nil {
+		baseContext.EnableTracking = *cfg.EnableTracking
+	}
+	if !seen["tracking-db-host"] && cfg.TrackingDBHost != nil {
+		baseContext.TrackingDBHost = *cfg.TrackingDBHost
+	}
+	if !seen["tracking-db-port"] && cfg.TrackingDBPort != nil {
+		baseContext.TrackingDBPort = *cfg.TrackingDBPort
+	}
+	if !seen["tracking-db-user"] && cfg.TrackingDBUser != nil {
+		baseContext.TrackingDBUser = *cfg.TrackingDBUser
+	}
+	if !seen["tracking-db-password"] && cfg.TrackingDBPassword != nil {
+		baseContext.TrackingDBPass = *cfg.TrackingDBPassword
+	}
+	if !seen["tracking-db-name"] && cfg.TrackingDBName != nil {
+		baseContext.TrackingDBName = *cfg.TrackingDBName
+	}
+	if !seen["resume-job-id"] && cfg.ResumeJobID != nil {
+		baseContext.ResumeJobID = *cfg.ResumeJobID
+	}
+	if !seen["debug"] && cfg.Debug != nil {
+		*debug = *cfg.Debug
+	}
+	if !seen["logfile"] && cfg.LogFile != nil {
+		*logFile = *cfg.LogFile
+	}
+
+	return nil
+}
+
 func main() {
 	baseContext := types.NewBaseContext()
 	flag.StringVar(&baseContext.SourceDatabases, "source-db-name", "", "Source database list separated by comma, eg: db1 or db1,db2.")
@@ -539,6 +737,7 @@ func main() {
 	flag.StringVar(&baseContext.TrackingDBName, "tracking-db-name", "data_checksum_tracking", "Tracking database name; auto-created if missing.")
 	flag.StringVar(&baseContext.ResumeJobID, "resume-job-id", "", "Resume a previous tracked job by job_id (implies --enable-tracking).")
 	debug := flag.Bool("debug", false, "debug mode (very verbose)")
+	configFile := flag.String("config", "", "Path to a JSON configuration file to load arguments from")
 	logFile := flag.String("logfile", "", "Log file name.")
 	version := flag.Bool("version", false, "Print version & exit")
 
@@ -550,6 +749,13 @@ func main() {
 		}
 		fmt.Println(appVersion)
 		return
+	}
+
+	if *configFile != "" {
+		if err := loadChecksumConfig(*configFile, baseContext, specifiedDatetimeRangeBegin, specifiedDatetimeRangeEnd, chunkSize, defaultRetries, debug, logFile); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: failed to load config file: %v\n", err)
+			os.Exit(1)
+		}
 	}
 
 	go baseContext.ListenOnPanicAbort()

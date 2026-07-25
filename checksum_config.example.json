@@ -1,0 +1,19 @@
+{
+  "source-db-host": "127.0.0.1",
+  "source-db-port": 3306,
+  "source-db-user": "root",
+  "source-db-password": "s3cr3t_password",
+  "target-db-host": "127.0.0.1",
+  "target-db-port": 3307,
+  "target-db-user": "root",
+  "target-db-password": "s3cr3t_password",
+  "source-db-name": "sbtest",
+  "source-table-name": "orders",
+  "threads": 4,
+  "chunk-size": 1000,
+  "default-retries": 10,
+  "enable-differential-reporting": true,
+  "generate-sync-sql": true,
+  "sync-sql-file": "sync_file.sql",
+  "max-sample-differences": 60
+}

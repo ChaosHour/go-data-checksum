@@ -1,0 +1,14 @@
+{
+  "source-db-host": "127.0.0.1",
+  "source-db-port": 3306,
+  "source-db-user": "root",
+  "source-db-password": "s3cr3t_password",
+  "target-db-host": "127.0.0.1",
+  "target-db-port": 3306,
+  "target-db-user": "root",
+  "target-db-password": "s3cr3t_password",
+  "source-db-name": "sbtest",
+  "source-table-name": "orders",
+  "enable-differential-reporting": true,
+  "threads": 4
+}
