@@ -578,6 +578,10 @@ time-scoped differential analysis as `--differential-use-time-range` and
 applies the resulting `REPLACE INTO` statements, looping per table until no
 differences remain in the window (or `--max-iterations` is hit).
 
+> For a full internals deep-dive (exactly how the collect/apply/converge loop
+> works, what "source-only" vs "modified" actually means, and a step-by-step
+> testing/verification guide) see **[NIBBLE.md](NIBBLE.md)**.
+
 It is not a replacement for `go-data-checksum` + `go-data-sync` — it's a
 convenience wrapper around exactly that pipeline for a bounded recovery
 window, so you don't have to hand-run checksum/generate/apply/re-verify in a
@@ -682,6 +686,93 @@ cp nibble_config.example.json nibble_config.json   # edit credentials/tables
 cp nibble_execute.example.json nibble_execute.json # edit credentials/tables
 ./bin/go-data-nibble --config="nibble_execute.json"
 ```
+
+### Load-testing go-data-nibble at scale (scripts/nibble-loadtest.sh)
+
+Before pointing `go-data-nibble` at a real large table, use
+`scripts/nibble-loadtest.sh` to exercise it against a synthetic large table
+first and see real timing/convergence behavior. It reuses your **existing**
+primary/replica containers instead of spinning up throwaway ones, so it needs
+a running, healthy primary + replica pair to start with (defaults assume
+`127.0.0.1:3306` primary / `127.0.0.1:3307` replica, matching a
+`client_primary1`/`client_replica1` setup in `~/.my.cnf`).
+
+**What it does, in order:**
+1. Confirms the replica is healthy, then stops just its SQL thread (IO thread
+   keeps running — no relay log gap) and adds a `REPLICATE_IGNORE_DB` filter
+   scoped to a throwaway `nibbletest` schema, so nothing written to that
+   schema on the primary is auto-applied to the replica. Restarts the SQL
+   thread. **Your real schemas and their replication are never touched.**
+2. Creates `nibbletest` independently on both sides, seeds a large table on
+   the primary via a containerized `sysbench` (nothing installed on your
+   host), and clones it to the replica as MyISAM.
+3. Updates/inserts a batch of rows on the primary only — because of the
+   filter from step 1, these never reach the replica, simulating a replica
+   that fell behind.
+4. Runs `go-data-nibble` dry-run, then `--execute`, timing each pass, then
+   verifies convergence with one more dry run.
+5. **Always** drops `nibbletest` on both sides and restores the replication
+   filter to exactly what it was before — even on failure or Ctrl-C.
+
+**Usage:**
+```bash
+# Quick smoke test
+scripts/nibble-loadtest.sh --table-size 50000 --drift-updates 2000 --drift-inserts 200
+
+# Realistic scale (this is what we validated: 2M rows, 55k drifted,
+# converged in 12 iterations, ~153s to execute)
+scripts/nibble-loadtest.sh \
+  --table-size 2000000 --drift-updates 50000 --drift-inserts 5000 \
+  --time-range-per-step 15m
+
+# Keep the test schema around afterward to inspect it manually
+# (the replication filter is still always restored)
+scripts/nibble-loadtest.sh --table-size 50000 --keep
+```
+Run `scripts/nibble-loadtest.sh --help` for the full flag list
+(`--primary-host`/`--primary-port`/`--replica-host`/`--replica-port`/
+`--db-user`/`--batch-diffs`/`--max-iterations`).
+
+**Requirements:** `docker` (only for containerized `sysbench` — nothing else
+runs in a container), plus local `mysql`/`mysqldump` clients. Reads
+`PRIMARY_DB_PASSWORD` from the environment, or falls back to the `password=`
+line under `[client]` in `~/.my.cnf`; never printed.
+
+**What to watch for:**
+- **The script refuses to run against an unhealthy replica.** It checks
+  `Replica_IO_Running`/`Replica_SQL_Running` before touching anything and
+  fails fast if either isn't `Yes` — don't work around this, fix replication
+  first.
+- **Server/host timezone mismatch.** If your MySQL containers run in a
+  different timezone than your host (ours run UTC), `go-data-nibble`'s
+  default `--specified-time-end` (host-local `time.Now()`) can land *before*
+  a `--specified-time-begin` derived from the server's own `NOW()`, producing
+  an "illegal time range" error. This script sidesteps it by pulling both
+  window bounds from the primary's own clock — do the same for real runs if
+  the tool's host and DB server timezones differ.
+- **A zero-width time window silently reports false convergence.** If
+  `--specified-time-begin`/`--specified-time-end` end up equal (or very
+  close), `go-data-nibble` finds nothing to compare and reports "converged"
+  even though real drift exists. The script guards against this by asserting
+  the first dry-run pass actually finds the injected drift, not just that the
+  final one converges — worth the same sanity check on a real run: if a dry
+  run against a table you know has drifted reports 0 differences, suspect the
+  window bounds before trusting it.
+- **GTID + `mysqldump` on an already-replicating server.** Dumping a single
+  schema/table from a GTID-enabled primary and loading it into a replica that
+  already has its own `GTID_EXECUTED` set fails
+  (`@@GLOBAL.GTID_PURGED cannot be changed...`) unless the dump is taken with
+  `--set-gtid-purged=OFF`. The script already does this; keep it in mind if
+  you adapt the cloning step for a real table.
+- **`--keep` only keeps the schema/user** — the replication filter is
+  *always* restored regardless of `--keep`, on success or failure. If a run
+  is interrupted (Ctrl-C, crash) before cleanup runs at all, check
+  `SHOW REPLICA STATUS` for a lingering `Replicate_Ignore_DB` filter and clear
+  it manually with `CHANGE REPLICATION FILTER REPLICATE_IGNORE_DB = ();`
+  (stop the SQL thread first).
+- **Don't run two instances concurrently** against the same
+  primary/replica — they'd fight over the same `nibbletest` schema and
+  replication filter.
 
 ## Testing
 
