@@ -1,0 +1,18 @@
+{
+  "source-db-host": "127.0.0.1",
+  "source-db-port": 3306,
+  "source-db-user": "root",
+  "source-db-password": "s3cr3t_password",
+  "target-db-host": "127.0.0.1",
+  "target-db-port": 3307,
+  "target-db-user": "root",
+  "target-db-password": "s3cr3t_password",
+  "tables": "sbtest.orders,sbtest.users",
+  "specified-time-column": "last_updated",
+  "specified-time-begin": "2026-07-16 00:00:00",
+  "time-range-per-step": "15m",
+  "batch-diffs": 5000,
+  "max-iterations": 100,
+  "apply-batch-size": 200,
+  "execute": true
+}

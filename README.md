@@ -50,6 +50,8 @@ go build -o bin/go-data-sync cmd/sync/main.go
         debug mode (very verbose)
   -default-retries int
         Default number of retries for various operations before panicking (default 10)
+  -differential-use-time-range
+        Restrict differential analysis to the specified time range if defined
   -enable-differential-reporting
         Enable detailed differential reporting showing which records differ by primary key (default false)
   -enable-tracking
@@ -253,6 +255,29 @@ rows from the target requires a manual, reviewed DELETE.
   --ignore-row-count-check
 ```
 
+### 8. Recover a replica that fell behind a known point in time (go-data-nibble)
+```bash
+# The replica was down/lagging starting 2026-07-16. Only these three tables
+# actually drifted, and last_updated is indexed on both sides. Dry run first:
+./bin/go-data-nibble \
+  --source-db-host="prod.example.com"    --source-db-user="checker" --source-db-password="xxxx" \
+  --target-db-host="replica.example.com" --target-db-user="checker" --target-db-password="xxxx" \
+  --tables="app_db.orders,app_db.users,app_db.events" \
+  --specified-time-column="last_updated" \
+  --specified-time-begin="2026-07-16 00:00:00" \
+  --time-range-per-step=1h
+
+# Looks right — converge for real:
+./bin/go-data-nibble \
+  --source-db-host="prod.example.com"    --source-db-user="checker" --source-db-password="xxxx" \
+  --target-db-host="replica.example.com" --target-db-user="checker" --target-db-password="xxxx" \
+  --tables="app_db.orders,app_db.users,app_db.events" \
+  --specified-time-column="last_updated" \
+  --specified-time-begin="2026-07-16 00:00:00" \
+  --time-range-per-step=1h \
+  --execute
+```
+
 ## UNDERSTANDING DIFFERENTIAL OUTPUT
 
 ### Sample Output with --enable-differential-reporting
@@ -280,6 +305,19 @@ Notes:
   the source table's key range.
 - The analysis runs whenever a table pair is found unequal, including when the
   row-count pre-check already shows a mismatch.
+- **`--differential-use-time-range`**: on very large tables (hundreds of GB+),
+  a full-table primary-key rescan for differential analysis can be
+  impractical — this flag scopes it to the `--specified-time-begin`/
+  `--specified-time-end` window instead. It requires `--specified-time-column`
+  to be set and walks the window in `--time-range-per-step` chunks, querying
+  source and target directly by that time column (the same nibbling strategy
+  the main checksum loop uses for `--specified-time-column`), instead of
+  paginating the primary key. This matters most on tables where changed rows
+  are scattered across the whole key range rather than clustered at the end
+  (e.g. UPDATEs touching old rows) — without this flag, a PK-based
+  differential pass still has to walk most of the key range even when only a
+  small time window actually differs. Make sure the time column is indexed on
+  both sides, or each window becomes a full table scan.
 
 ### Explanation of Symbols
 - **`-` (minus)**: Records that exist in the source database but are missing in the target
@@ -528,6 +566,105 @@ Safety model:
 
 # 4. Re-verify
 ./bin/go-data-checksum ... --enable-differential-reporting
+```
+
+## COMPANION CLI: go-data-nibble
+
+`go-data-nibble` (built alongside the other two binaries by `make build`)
+converges a handful of tables onto their source in one command, for the
+specific case of "a replica fell behind or was down from a known point in
+time, and only a few tables actually drifted." It repeatedly runs the same
+time-scoped differential analysis as `--differential-use-time-range` and
+applies the resulting `REPLACE INTO` statements, looping per table until no
+differences remain in the window (or `--max-iterations` is hit).
+
+It is not a replacement for `go-data-checksum` + `go-data-sync` — it's a
+convenience wrapper around exactly that pipeline for a bounded recovery
+window, so you don't have to hand-run checksum/generate/apply/re-verify in a
+loop yourself. Reach for `go-data-checksum --enable-differential-reporting`
+when you don't already know the drift is time-bounded, or need the full
+tracking/resume machinery.
+
+```
+  -tables string
+        Comma-separated db.table list to converge, eg: sbtest.orders,sbtest.users
+        (required). Target db/table names are assumed identical to source.
+  -specified-time-column string
+        Time column to nibble by, eg: last_updated (required).
+  -specified-time-begin string
+        Start of the drift window, eg. when the replica fell behind (required).
+  -specified-time-end string
+        End of the drift window. Defaults to now, captured once at startup.
+  -time-range-per-step duration
+        Time window size per nibble step (default 5m0s).
+  -batch-diffs int
+        Max differences collected (and applied) per iteration (default 500).
+  -max-iterations int
+        Give up on a table after this many iterations without converging (default 50).
+  -execute
+        Actually apply the statements. Without this flag, runs one dry-run
+        analysis pass per table and exits (like go-data-sync).
+  -apply-batch-size int
+        Number of REPLACE INTO statements per transaction when applying (default 200).
+  -config string
+        Path to a JSON configuration file (see nibble_config.example.json)
+```
+
+Requirements and safety model:
+
+- The time column **must be indexed** on both sides, or every nibble step
+  becomes a full table scan — see `--differential-use-time-range` above for
+  why time-scoped chunking only pays off with an index.
+- **Dry-run by default** — one analysis pass per table, prints what would be
+  applied, nothing executed until `--execute`.
+- **Never deletes** — target-only rows (present on the target, no source
+  match) are logged loudly as warnings but never touched, exactly like
+  `go-data-checksum`'s sync SQL generation. If your workload does hard
+  `DELETE`s during the drift window, this tool alone will not fully converge
+  the tables; review target-only warnings manually.
+- Each iteration rescans the whole `[--specified-time-begin, --specified-time-end]`
+  window (already-converged sub-windows are cheap re-checks, not free), so
+  size `--batch-diffs` generously relative to the expected drift — a table
+  that converges in 1-2 passes is far cheaper than one that needs 50.
+
+**Option A: Command-line Flags**
+```bash
+# Dry run: see what a 15-day drift window would apply, per table
+./bin/go-data-nibble \
+  --source-db-host=primary.example.com --source-db-user=admin --source-db-password=xxx \
+  --target-db-host=replica.example.com --target-db-user=admin --target-db-password=xxx \
+  --tables=sbtest.orders,sbtest.users,sbtest.events \
+  --specified-time-column=last_updated \
+  --specified-time-begin='2026-07-16 00:00:00' \
+  --time-range-per-step=1h
+
+# Converge for real
+./bin/go-data-nibble \
+  --source-db-host=primary.example.com --source-db-user=admin --source-db-password=xxx \
+  --target-db-host=replica.example.com --target-db-user=admin --target-db-password=xxx \
+  --tables=sbtest.orders,sbtest.users,sbtest.events \
+  --specified-time-column=last_updated \
+  --specified-time-begin='2026-07-16 00:00:00' \
+  --time-range-per-step=1h \
+  --execute
+```
+
+**Option B: JSON Configuration**
+Two example configs are provided — they differ only in `execute` and in the
+tuning of `time-range-per-step`/`batch-diffs`/`max-iterations`:
+- `nibble_config.example.json` — `"execute": false`, a first dry-run pass.
+- `nibble_execute.example.json` — `"execute": true`, smaller time steps and a
+  higher diff batch/iteration cap, sized for converging a large table once
+  the dry run above looks right.
+
+```bash
+# 1. Dry run
+cp nibble_config.example.json nibble_config.json   # edit credentials/tables
+./bin/go-data-nibble --config="nibble_config.json"
+
+# 2. Converge for real
+cp nibble_execute.example.json nibble_execute.json # edit credentials/tables
+./bin/go-data-nibble --config="nibble_execute.json"
 ```
 
 ## Testing
@@ -814,4 +951,30 @@ Copy `sync_apply.example.json` to `sync_apply.json`, edit your target connection
 ./bin/go-data-sync --config="sync_apply.json"
 ```
 
+---
+
+### 4. Alternative: recovering a known drift window in one command (go-data-nibble)
+
+Steps 1-3 are the general checksum → generate → apply → re-verify workflow
+for the whole table. If instead you know *when* the drift started (a replica
+outage, a paused replication thread) and only a handful of tables are
+affected, `go-data-nibble` folds steps 1-3 into a single per-table loop that
+repeats until converged — see "COMPANION CLI: go-data-nibble" above.
+
+**Option A: Command-line Flags**
+```bash
+./bin/go-data-nibble \
+  --source-db-host="${SOURCE_HOST}" --source-db-user="${DB_USER}" --source-db-password="${SOURCE_DB_PASS}" \
+  --target-db-host="${TARGET_HOST}" --target-db-user="${DB_USER}" --target-db-password="${TARGET_DB_PASS}" \
+  --tables="${DB_NAME}.${SOURCE_TB_NAME}" \
+  --specified-time-column="last_updated" \
+  --specified-time-begin="2026-07-16 00:00:00" \
+  --time-range-per-step=1h \
+  --execute
+```
+
+**Option B: JSON Configuration**
+Copy `nibble_execute.example.json` to `nibble_execute.json`, edit your credentials, tables, and drift window, and run:
+```bash
+./bin/go-data-nibble --config="nibble_execute.json"
 ```
