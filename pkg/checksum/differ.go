@@ -53,11 +53,17 @@ func (td *TableDiffer) AnalyzeAndReportDifferences() error {
 	ctx.ChecksumIterationRangeMaxValues = nil
 
 	// Get min/max values for iteration
-	if err := ctx.ReadUniqueKeyRangeMinValues(); err != nil {
-		return err
-	}
-	if err := ctx.ReadUniqueKeyRangeMaxValues(); err != nil {
-		return err
+	if ctx.DifferentialUseTimeRange && ctx.Context.SpecifiedDatetimeColumn != "" {
+		if err := td.readTimeScopedBounds(); err != nil {
+			return err
+		}
+	} else {
+		if err := ctx.ReadUniqueKeyRangeMinValues(); err != nil {
+			return err
+		}
+		if err := ctx.ReadUniqueKeyRangeMaxValues(); err != nil {
+			return err
+		}
 	}
 
 	report := &DifferenceReport{
@@ -113,6 +119,66 @@ func (td *TableDiffer) AnalyzeAndReportDifferences() error {
 	return nil
 }
 
+// readTimeScopedBounds fetches the unique key boundaries specifically within the configured time window.
+func (td *TableDiffer) readTimeScopedBounds() error {
+	ctx := td.Context
+
+	minQuery, err := builder.BuildUniqueKeyMinValuesPreparedQuery(
+		ctx.PerTableContext.SourceDatabaseName,
+		ctx.PerTableContext.SourceTableName,
+		ctx.UniqueKey,
+	)
+	if err != nil {
+		return err
+	}
+
+	whereClause := fmt.Sprintf("%s >= ? AND %s <= ?",
+		types.EscapeName(ctx.Context.SpecifiedDatetimeColumn),
+		types.EscapeName(ctx.Context.SpecifiedDatetimeColumn),
+	)
+
+	if ctx.UniqueIndexName != "" {
+		minQuery = injectIgnoreIndex(minQuery, ctx.PerTableContext.SourceDatabaseName, ctx.PerTableContext.SourceTableName, ctx.UniqueIndexName)
+	}
+
+	minQuery = injectWhereIntoMinMaxQuery(minQuery, whereClause)
+
+	ctx.UniqueKeyRangeMinValues = types.NewColumnValues(ctx.UniqueKey.Len())
+	err = ctx.Context.SourceDB.QueryRow(minQuery, ctx.Context.SpecifiedDatetimeRangeBegin, ctx.Context.SpecifiedDatetimeRangeEnd).Scan(ctx.UniqueKeyRangeMinValues.ValuesPointers...)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil
+		}
+		return err
+	}
+
+	maxQuery, err := builder.BuildUniqueKeyMaxValuesPreparedQuery(
+		ctx.PerTableContext.SourceDatabaseName,
+		ctx.PerTableContext.SourceTableName,
+		ctx.UniqueKey,
+	)
+	if err != nil {
+		return err
+	}
+
+	if ctx.UniqueIndexName != "" {
+		maxQuery = injectIgnoreIndex(maxQuery, ctx.PerTableContext.SourceDatabaseName, ctx.PerTableContext.SourceTableName, ctx.UniqueIndexName)
+	}
+
+	maxQuery = injectWhereIntoMinMaxQuery(maxQuery, whereClause)
+
+	ctx.UniqueKeyRangeMaxValues = types.NewColumnValues(ctx.UniqueKey.Len())
+	err = ctx.Context.SourceDB.QueryRow(maxQuery, ctx.Context.SpecifiedDatetimeRangeBegin, ctx.Context.SpecifiedDatetimeRangeEnd).Scan(ctx.UniqueKeyRangeMaxValues.ValuesPointers...)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil
+		}
+		return err
+	}
+
+	return nil
+}
+
 // mergeChunkReport aggregates a chunk report into the total report, keeping
 // the sample list capped at maxSamples.
 func (td *TableDiffer) mergeChunkReport(report, chunkReport *DifferenceReport, maxSamples int) {
@@ -152,6 +218,15 @@ func (td *TableDiffer) analyzeChunkDifferences() (*DifferenceReport, error) {
 	}
 	whereClause := fmt.Sprintf("%s AND %s", rangeStartComparison, rangeEndComparison)
 	args := append(rangeStartArgs, rangeEndArgs...)
+
+	if ctx.DifferentialUseTimeRange && ctx.Context.SpecifiedDatetimeColumn != "" {
+		whereClause = fmt.Sprintf("%s AND %s >= ? AND %s <= ?",
+			whereClause,
+			types.EscapeName(ctx.Context.SpecifiedDatetimeColumn),
+			types.EscapeName(ctx.Context.SpecifiedDatetimeColumn),
+		)
+		args = append(args, ctx.Context.SpecifiedDatetimeRangeBegin, ctx.Context.SpecifiedDatetimeRangeEnd)
+	}
 
 	sourceRecords, err := td.getChunkRecords(
 		ctx.Context.SourceDB,
@@ -213,12 +288,33 @@ func (td *TableDiffer) collectOutOfRangeTargetRecords(report *DifferenceReport, 
 		)
 	}
 
+	var timeClause string
+	var timeArgs []interface{}
+	if ctx.DifferentialUseTimeRange && ctx.Context.SpecifiedDatetimeColumn != "" {
+		timeClause = fmt.Sprintf("%s >= ? AND %s <= ?",
+			types.EscapeName(ctx.Context.SpecifiedDatetimeColumn),
+			types.EscapeName(ctx.Context.SpecifiedDatetimeColumn),
+		)
+		timeArgs = []interface{}{ctx.Context.SpecifiedDatetimeRangeBegin, ctx.Context.SpecifiedDatetimeRangeEnd}
+	}
+
 	for _, s := range sweeps {
+		wc := s.whereClause
+		args := s.args
+		if timeClause != "" {
+			if wc == "1=1" {
+				wc = timeClause
+			} else {
+				wc = fmt.Sprintf("%s AND %s", wc, timeClause)
+			}
+			args = append(args, timeArgs...)
+		}
+
 		targetRecords, err := td.getChunkRecords(
 			ctx.Context.TargetDB,
 			ctx.PerTableContext.TargetDatabaseName,
 			ctx.PerTableContext.TargetTableName,
-			s.whereClause, s.args,
+			wc, args,
 		)
 		if err != nil {
 			return fmt.Errorf("failed to get out-of-range target records: %v", err)
@@ -741,4 +837,22 @@ func (td *TableDiffer) writeSyncSQLToFile(content string) error {
 	}
 
 	return nil
+}
+
+func injectWhereIntoMinMaxQuery(query, where string) string {
+	lower := strings.ToLower(query)
+	idx := strings.Index(lower, "order by")
+	if idx == -1 {
+		idx = strings.Index(lower, "limit")
+	}
+	if idx != -1 {
+		return query[:idx] + "WHERE " + where + " " + query[idx:]
+	}
+	return query + " WHERE " + where
+}
+
+func injectIgnoreIndex(query, dbName, tableName, indexName string) string {
+	escapedTable := fmt.Sprintf("%s.%s", types.EscapeName(dbName), types.EscapeName(tableName))
+	ignoreClause := fmt.Sprintf(" IGNORE INDEX (%s)", types.EscapeName(indexName))
+	return strings.Replace(query, escapedTable, escapedTable+ignoreClause, 1)
 }
