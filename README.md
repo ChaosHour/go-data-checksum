@@ -606,9 +606,25 @@ tracking/resume machinery.
         analysis pass per table and exits (like go-data-sync).
   -apply-batch-size int
         Number of REPLACE INTO statements per transaction when applying (default 200).
+  -skip-binlog
+        Set @@session.sql_log_bin = 0 on the target connection. Recommended
+        when repairing a replica directly, so applied REPLACE INTOs don't
+        become errant GTID transactions on a GTID-enabled replica.
+  -skip-fk-checks
+        Set @@session.foreign_key_checks = 0 on the target connection.
+  -skip-unique-checks
+        Set @@session.unique_checks = 0 on the target connection.
+  -no-auto-value-on-zero
+        Set @@session.sql_mode = 'NO_AUTO_VALUE_ON_ZERO' on the target connection.
   -config string
         Path to a JSON configuration file (see nibble_config.example.json)
 ```
+
+The four `-skip-*`/`-no-auto-value-on-zero` flags mirror `go-data-sync`'s
+flags of the same name and are all opt-in (default `false`) — only the target
+connection is affected, never the source. `--skip-binlog` in particular is
+worth turning on whenever you're repairing a replica directly, same reasoning
+as `go-data-sync`'s equivalent flag.
 
 Requirements and safety model:
 

@@ -14,5 +14,9 @@
   "batch-diffs": 5000,
   "max-iterations": 100,
   "apply-batch-size": 200,
+  "skip-binlog": true,
+  "skip-fk-checks": true,
+  "skip-unique-checks": true,
+  "no-auto-value-on-zero": true,
   "execute": true
 }

@@ -54,11 +54,15 @@ type NibbleJSONConfig struct {
 	MaxIterations       *int    `json:"max-iterations,omitempty"`
 	Execute             *bool   `json:"execute,omitempty"`
 	ApplyBatchSize      *int    `json:"apply-batch-size,omitempty"`
+	SkipBinlog          *bool   `json:"skip-binlog,omitempty"`
+	SkipFK              *bool   `json:"skip-fk-checks,omitempty"`
+	SkipUnique          *bool   `json:"skip-unique-checks,omitempty"`
+	NoAutoValueOnZero   *bool   `json:"no-auto-value-on-zero,omitempty"`
 	Debug               *bool   `json:"debug,omitempty"`
 	LogFile             *string `json:"logfile,omitempty"`
 }
 
-func loadNibbleConfig(path string, baseContext *types.BaseContext, tables, specifiedTimeBegin, specifiedTimeEnd *string, batchDiffs, maxIterations, applyBatchSize *int, execute, debug *bool, logFile *string) error {
+func loadNibbleConfig(path string, baseContext *types.BaseContext, tables, specifiedTimeBegin, specifiedTimeEnd *string, batchDiffs, maxIterations, applyBatchSize *int, execute, skipBinlog, skipFK, skipUnique, noAutoValueOnZero, debug *bool, logFile *string) error {
 	file, err := os.Open(path)
 	if err != nil {
 		return err
@@ -135,6 +139,18 @@ func loadNibbleConfig(path string, baseContext *types.BaseContext, tables, speci
 	}
 	if !seen["apply-batch-size"] && cfg.ApplyBatchSize != nil {
 		*applyBatchSize = *cfg.ApplyBatchSize
+	}
+	if !seen["skip-binlog"] && cfg.SkipBinlog != nil {
+		*skipBinlog = *cfg.SkipBinlog
+	}
+	if !seen["skip-fk-checks"] && cfg.SkipFK != nil {
+		*skipFK = *cfg.SkipFK
+	}
+	if !seen["skip-unique-checks"] && cfg.SkipUnique != nil {
+		*skipUnique = *cfg.SkipUnique
+	}
+	if !seen["no-auto-value-on-zero"] && cfg.NoAutoValueOnZero != nil {
+		*noAutoValueOnZero = *cfg.NoAutoValueOnZero
 	}
 	if !seen["debug"] && cfg.Debug != nil {
 		*debug = *cfg.Debug
@@ -282,6 +298,51 @@ func nibbleTable(baseContext *types.BaseContext, pair tablePair, execute bool, m
 	}
 }
 
+// initDB opens the source and target connections. It mirrors
+// BaseContext.InitDB, except the target DSN can optionally carry the same
+// session-level overrides go-data-sync supports (--skip-binlog etc.) --
+// needed here because, unlike go-data-checksum, this tool writes to the
+// target directly. The source connection is never affected.
+func initDB(baseContext *types.BaseContext, skipBinlog, skipFK, skipUnique, noAutoValueOnZero bool) error {
+	databaseName := "information_schema"
+	sourceDBUri := types.BuildDBUri(baseContext.SourceDBUser, baseContext.SourceDBPass, baseContext.SourceDBHost, baseContext.SourceDBPort, databaseName, baseContext.Timeout)
+	targetDBUri := types.BuildDBUri(baseContext.TargetDBUser, baseContext.TargetDBPass, baseContext.TargetDBHost, baseContext.TargetDBPort, databaseName, baseContext.Timeout)
+	if skipFK {
+		targetDBUri += "&foreign_key_checks=0"
+	}
+	if skipUnique {
+		targetDBUri += "&unique_checks=0"
+	}
+	if skipBinlog {
+		targetDBUri += "&sql_log_bin=0"
+	}
+	if noAutoValueOnZero {
+		targetDBUri += "&sql_mode=%27NO_AUTO_VALUE_ON_ZERO%27"
+	}
+
+	connect := func(dbUri string) (*gosql.DB, error) {
+		db, err := gosql.Open("mysql", dbUri)
+		if err != nil {
+			return nil, err
+		}
+		if err := db.Ping(); err != nil {
+			return nil, err
+		}
+		db.SetConnMaxLifetime(3 * time.Minute)
+		db.SetMaxIdleConns(30)
+		return db, nil
+	}
+
+	var err error
+	if baseContext.SourceDB, err = connect(sourceDBUri); err != nil {
+		return err
+	}
+	if baseContext.TargetDB, err = connect(targetDBUri); err != nil {
+		return err
+	}
+	return nil
+}
+
 func main() {
 	baseContext := types.NewBaseContext()
 
@@ -305,6 +366,10 @@ func main() {
 	maxIterations := flag.Int("max-iterations", 50, "Give up on a table after this many iterations without converging.")
 	execute := flag.Bool("execute", false, "Actually apply the statements. Without this flag, runs one dry-run analysis pass per table and exits (like go-data-sync).")
 	applyBatchSize := flag.Int("apply-batch-size", 200, "Number of REPLACE INTO statements per transaction when applying.")
+	skipBinlog := flag.Bool("skip-binlog", false, "Set @@session.sql_log_bin = 0 on the target connection. Recommended when repairing a replica directly, so applied REPLACE INTOs don't become errant GTID transactions on a GTID-enabled replica.")
+	skipFK := flag.Bool("skip-fk-checks", false, "Set @@session.foreign_key_checks = 0 on the target connection.")
+	skipUnique := flag.Bool("skip-unique-checks", false, "Set @@session.unique_checks = 0 on the target connection.")
+	noAutoValueOnZero := flag.Bool("no-auto-value-on-zero", false, "Set @@session.sql_mode = 'NO_AUTO_VALUE_ON_ZERO' on the target connection.")
 	debug := flag.Bool("debug", false, "debug mode (very verbose)")
 	logFile := flag.String("logfile", "", "Log file name.")
 	configFile := flag.String("config", "", "Path to a JSON configuration file to load arguments from")
@@ -322,7 +387,7 @@ func main() {
 	}
 
 	if *configFile != "" {
-		if err := loadNibbleConfig(*configFile, baseContext, tables, specifiedDatetimeRangeBegin, specifiedDatetimeRangeEnd, batchDiffs, maxIterations, applyBatchSize, execute, debug, logFile); err != nil {
+		if err := loadNibbleConfig(*configFile, baseContext, tables, specifiedDatetimeRangeBegin, specifiedDatetimeRangeEnd, batchDiffs, maxIterations, applyBatchSize, execute, skipBinlog, skipFK, skipUnique, noAutoValueOnZero, debug, logFile); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: failed to load config file: %v\n", err)
 			os.Exit(1)
 		}
@@ -366,7 +431,7 @@ func main() {
 		baseContext.Log.Infof("Finished go-data-nibble. TotalDuration=%+v", time.Since(startTime))
 	}()
 
-	if err := baseContext.InitDB(); err != nil {
+	if err := initDB(baseContext, *skipBinlog, *skipFK, *skipUnique, *noAutoValueOnZero); err != nil {
 		baseContext.Log.Fatalf("DB connection initiate failed: %v", err)
 	}
 
