@@ -65,6 +65,7 @@ at all — this is the whole reason it's cheap on a huge table.
 (`pkg/checksum/differ.go:434`)
 
 Both result sets are keyed by primary key. For each source row:
+
 - not present in the target result set → **`source_only`**
 - present, but checksum differs → **`modified`**
 - present, checksum matches → **identical**
@@ -114,7 +115,7 @@ hit the error, rather than being silently retried.
 
 (`cmd/nibble/main.go:217`)
 
-```
+```bash
 for iteration := 1; ; iteration++ {
     report := differ.CollectDifferences()          // full rescan of the window
     if report.SourceOnlyRecords + report.ModifiedRecords == 0 {
@@ -178,6 +179,7 @@ parser) and `tablePair.String()` — pure functions with no DB dependency.
 `applyStatements()`/`nibbleTable()`/`initDB()` need a real MySQL connection
 and aren't unit tested, same reasoning as why `go-data-sync`'s apply path
 isn't either. Run with:
+
 ```bash
 go test ./cmd/nibble/... -v
 ```
@@ -190,6 +192,7 @@ using your **existing** primary/replica containers rather than spinning up
 throwaway ones.
 
 **What it proves, each run:**
+
 1. The tool correctly finds injected drift (it asserts this explicitly —
    see §5, "zero-width window" — a run that reports 0 differences when
    drift was just injected is treated as a script failure, not a pass).
@@ -204,6 +207,7 @@ throwaway ones.
    filter and drops the test schema on exit, success or failure.
 
 **Run it:**
+
 ```bash
 # Quick smoke test (seconds)
 scripts/nibble-loadtest.sh --table-size 50000 --drift-updates 2000 --drift-inserts 200
@@ -213,7 +217,8 @@ scripts/nibble-loadtest.sh --table-size 50000 --drift-updates 2000 --drift-inser
 scripts/nibble-loadtest.sh \
   --table-size 2000000 --drift-updates 50000 --drift-inserts 5000 \
   --time-range-per-step 15m
-```
+
+```bash
 Full flag reference: `scripts/nibble-loadtest.sh --help`. See `README.md`'s
 "Load-testing go-data-nibble at scale" section for requirements and
 troubleshooting specific to the script.
@@ -239,7 +244,7 @@ mysql -h<source> -e "SELECT COUNT(*) FROM mydb.mytable WHERE last_updated BETWEE
 mysql -h<target> -e "SELECT COUNT(*) FROM mydb.mytable WHERE last_updated BETWEEN '...' AND '...';"
 
 # 4. Re-run the dry run from step 1 -- it should now report "converged after 1 iteration(s)"
-```
+```bash
 Step 3 is the important one: don't just trust the tool's own "converged"
 claim — a raw `COUNT(*)`/checksum comparison outside the tool is the
 independent check. For a stronger check than row counts, compare a
