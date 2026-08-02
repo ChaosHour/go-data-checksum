@@ -4,11 +4,13 @@
 APP_NAME := go-data-checksum
 SYNC_APP_NAME := go-data-sync
 NIBBLE_APP_NAME := go-data-nibble
+NIBBLE_LOADTEST_APP_NAME := go-data-nibble-loadtest
 BUILD_DIR := bin
 CMD_DIR := cmd/checksum
 MAIN_FILE := $(CMD_DIR)/main.go
 SYNC_MAIN_FILE := cmd/sync/main.go
 NIBBLE_MAIN_FILE := cmd/nibble/main.go
+NIBBLE_LOADTEST_MAIN_FILE := cmd/nibbleloadtest/main.go
 GO_FILES := $(shell find . -name "*.go" -type f -not -path "./vendor/*")
 
 VERSION := $(shell cat RELEASE_VERSION 2>/dev/null || echo "dev")
@@ -37,6 +39,8 @@ build: $(BUILD_DIR)
 	@echo "Binary built at $(BUILD_DIR)/$(SYNC_APP_NAME)"
 	$(GO_BUILD) -o $(BUILD_DIR)/$(NIBBLE_APP_NAME) $(NIBBLE_MAIN_FILE)
 	@echo "Binary built at $(BUILD_DIR)/$(NIBBLE_APP_NAME)"
+	$(GO_BUILD) -o $(BUILD_DIR)/$(NIBBLE_LOADTEST_APP_NAME) $(NIBBLE_LOADTEST_MAIN_FILE)
+	@echo "Binary built at $(BUILD_DIR)/$(NIBBLE_LOADTEST_APP_NAME)"
 
 # Run tests
 test:

@@ -774,6 +774,25 @@ line under `[client]` in `~/.my.cnf`; never printed.
   primary/replica — they'd fight over the same `nibbletest` schema and
   replication filter.
 
+**Other implementations of the same load test:** the bash script above is the
+original; the following are equivalent ports (same options, same behavior,
+same "what to watch for" list applies to all of them) for whichever shell/
+language you'd rather use:
+
+| Variant | Path | Run with |
+|---|---|---|
+| bash (original) | `scripts/nibble-loadtest.sh` | `scripts/nibble-loadtest.sh [options]` |
+| zsh | `scripts/nibble-loadtest.zsh` | `scripts/nibble-loadtest.zsh [options]` |
+| Python 3 (via [uv](https://docs.astral.sh/uv/)) | `scripts/nibble_loadtest.py` | `uv run scripts/nibble_loadtest.py [options]` |
+| Go | `cmd/nibbleloadtest/main.go` | `./bin/go-data-nibble-loadtest [options]` (built by `make build`) |
+
+The Python version needs no manual setup — it declares its one dependency
+(`pymysql`) via inline script metadata, and `uv run` creates an ephemeral venv
+and installs it automatically on first run. The Go version is a normal binary
+built alongside the other three (`go-data-checksum`, `go-data-sync`,
+`go-data-nibble`) by `make build`; run it from the repo root, or pass
+`-repo-root <path>` if not.
+
 ## Testing
 
 ```bash
