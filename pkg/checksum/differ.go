@@ -35,9 +35,11 @@ type RecordDifference struct {
 	FullRowData      map[string]interface{} // Full row data from source for REPLACE INTO
 }
 
-// AnalyzeAndReportDifferences performs comprehensive differential analysis.
-// It always scans the entire table pair from the beginning, regardless of the
-// state the preceding checksum loop stopped in.
+// AnalyzeAndReportDifferences performs comprehensive differential analysis,
+// logs a human-readable report, persists sampled differences when tracking
+// is enabled, and (if requested) writes sync SQL to a file. It always scans
+// the entire table pair (or the entire configured time window) from the
+// beginning, regardless of the state the preceding checksum loop stopped in.
 func (td *TableDiffer) AnalyzeAndReportDifferences() error {
 	ctx := td.Context
 
@@ -45,54 +47,8 @@ func (td *TableDiffer) AnalyzeAndReportDifferences() error {
 		ctx.PerTableContext.SourceDatabaseName, ctx.PerTableContext.SourceTableName,
 		ctx.PerTableContext.TargetDatabaseName, ctx.PerTableContext.TargetTableName)
 
-	// Reset any iteration state left over from the checksum loop so the
-	// analysis covers the whole table, not just the range after the first
-	// mismatched chunk.
-	atomic.StoreInt64(&ctx.PerTableContext.Iteration, 0)
-	ctx.ChecksumIterationRangeMinValues = nil
-	ctx.ChecksumIterationRangeMaxValues = nil
-
-	// Get min/max values for iteration
-	if err := ctx.ReadUniqueKeyRangeMinValues(); err != nil {
-		return err
-	}
-	if err := ctx.ReadUniqueKeyRangeMaxValues(); err != nil {
-		return err
-	}
-
-	report := &DifferenceReport{
-		SampleDifferences: make([]RecordDifference, 0),
-	}
-	maxSamples := ctx.Context.MaxSampleDifferences
-
-	sourceIsEmpty := len(ctx.UniqueKeyRangeMinValues.AbstractValues()) == 0 ||
-		ctx.UniqueKeyRangeMinValues.AbstractValues()[0] == nil
-
-	if !sourceIsEmpty {
-		// Process data in chunks for differential analysis
-		var hasFurtherRange = true
-		for hasFurtherRange {
-			var err error
-			hasFurtherRange, err = ctx.CalculateNextIterationRangeEndValues()
-			if err != nil {
-				return err
-			}
-
-			if hasFurtherRange {
-				chunkReport, err := td.analyzeChunkDifferences()
-				if err != nil {
-					return err
-				}
-				td.mergeChunkReport(report, chunkReport, maxSamples)
-				ctx.AddIteration()
-			}
-		}
-	}
-
-	// Chunk boundaries are driven from the source table, so target rows with
-	// keys outside the source key range (or every target row, when the source
-	// table is empty) have not been seen yet. Sweep them as target-only.
-	if err := td.collectOutOfRangeTargetRecords(report, sourceIsEmpty, maxSamples); err != nil {
+	report, err := td.CollectDifferences()
+	if err != nil {
 		return err
 	}
 
@@ -111,6 +67,150 @@ func (td *TableDiffer) AnalyzeAndReportDifferences() error {
 	}
 
 	return nil
+}
+
+// CollectDifferences runs the differential scan -- time-scoped when
+// ctx.DifferentialUseTimeRange is set (see analyzeDifferencesByTimeRange),
+// otherwise a full primary-key range sweep -- and returns the aggregated
+// report. Unlike AnalyzeAndReportDifferences it has no side effects (no
+// logging beyond per-chunk debug, no tracking writes, no sync-file output),
+// so callers that want to drive their own apply-and-recheck loop in process
+// (e.g. cmd/nibble) can call it directly instead of shelling out to the CLI.
+func (td *TableDiffer) CollectDifferences() (*DifferenceReport, error) {
+	ctx := td.Context
+
+	// Reset any iteration state left over from the checksum loop so the
+	// analysis covers the whole table (or whole time window), not just the
+	// range after the first mismatched chunk.
+	atomic.StoreInt64(&ctx.PerTableContext.Iteration, 0)
+	ctx.ChecksumIterationRangeMinValues = nil
+	ctx.ChecksumIterationRangeMaxValues = nil
+
+	report := &DifferenceReport{
+		SampleDifferences: make([]RecordDifference, 0),
+	}
+	maxSamples := ctx.Context.MaxSampleDifferences
+
+	if ctx.DifferentialUseTimeRange && ctx.Context.SpecifiedDatetimeColumn != "" {
+		// Nibble by the time column directly, exactly like the primary
+		// time-column checksum loop. This is required for very large tables
+		// (hundreds of GB+) where rows matching the time window are scattered
+		// across the whole primary-key range: walking chunk boundaries by PK
+		// offset would still touch most of the table per chunk regardless of
+		// how tightly the time window is scoped.
+		if err := td.analyzeDifferencesByTimeRange(report, maxSamples); err != nil {
+			return nil, err
+		}
+	} else {
+		if err := ctx.ReadUniqueKeyRangeMinValues(); err != nil {
+			return nil, err
+		}
+		if err := ctx.ReadUniqueKeyRangeMaxValues(); err != nil {
+			return nil, err
+		}
+
+		sourceIsEmpty := len(ctx.UniqueKeyRangeMinValues.AbstractValues()) == 0 ||
+			ctx.UniqueKeyRangeMinValues.AbstractValues()[0] == nil
+
+		if !sourceIsEmpty {
+			// Process data in chunks for differential analysis
+			var hasFurtherRange = true
+			for hasFurtherRange {
+				var err error
+				hasFurtherRange, err = ctx.CalculateNextIterationRangeEndValues()
+				if err != nil {
+					return nil, err
+				}
+
+				if hasFurtherRange {
+					chunkReport, err := td.analyzeChunkDifferences()
+					if err != nil {
+						return nil, err
+					}
+					td.mergeChunkReport(report, chunkReport, maxSamples)
+					ctx.AddIteration()
+				}
+			}
+		}
+
+		// Chunk boundaries are driven from the source table, so target rows with
+		// keys outside the source key range (or every target row, when the source
+		// table is empty) have not been seen yet. Sweep them as target-only.
+		if err := td.collectOutOfRangeTargetRecords(report, sourceIsEmpty, maxSamples); err != nil {
+			return nil, err
+		}
+	}
+
+	return report, nil
+}
+
+// analyzeDifferencesByTimeRange walks [SpecifiedDatetimeRangeBegin, SpecifiedDatetimeRangeEnd)
+// in SpecifiedTimeRangePerStep-sized windows, comparing source/target records directly on the
+// time column. Each window is a plain indexed range scan on the time column regardless of table
+// size, unlike primary-key nibbling which must walk the key space between whatever min/max PK
+// values happen to fall in the window -- on a huge table those can span most of the key range.
+func (td *TableDiffer) analyzeDifferencesByTimeRange(report *DifferenceReport, maxSamples int) error {
+	ctx := td.Context
+
+	var hasFurtherRange = true
+	for hasFurtherRange {
+		var err error
+		hasFurtherRange, err = ctx.CalculateNextIterationTimeRange()
+		if err != nil {
+			return err
+		}
+		if !hasFurtherRange {
+			break
+		}
+
+		chunkReport, err := td.analyzeTimeChunkDifferences()
+		if err != nil {
+			return err
+		}
+		td.mergeChunkReport(report, chunkReport, maxSamples)
+		ctx.AddIteration()
+	}
+	return nil
+}
+
+// analyzeTimeChunkDifferences compares source/target records for the current
+// [TimeIterationRangeMinValue, TimeIterationRangeMaxValue) window (inclusive of the end value on
+// the final chunk, mirroring IterationTimeRangeQueryChecksum).
+func (td *TableDiffer) analyzeTimeChunkDifferences() (*DifferenceReport, error) {
+	ctx := td.Context
+
+	endComparisonSign := builder.LessThanComparisonSign
+	if ctx.isFinalTimeChunk() {
+		endComparisonSign = builder.LessThanOrEqualsComparisonSign
+	}
+	whereClause := fmt.Sprintf("%s >= ? AND %s %s ?",
+		types.EscapeName(ctx.Context.SpecifiedDatetimeColumn),
+		types.EscapeName(ctx.Context.SpecifiedDatetimeColumn),
+		endComparisonSign,
+	)
+	args := []interface{}{ctx.TimeIterationRangeMinValue, ctx.TimeIterationRangeMaxValue}
+
+	sourceRecords, err := td.getChunkRecords(
+		ctx.Context.SourceDB,
+		ctx.PerTableContext.SourceDatabaseName,
+		ctx.PerTableContext.SourceTableName,
+		whereClause, args,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get source records: %v", err)
+	}
+
+	targetRecords, err := td.getChunkRecords(
+		ctx.Context.TargetDB,
+		ctx.PerTableContext.TargetDatabaseName,
+		ctx.PerTableContext.TargetTableName,
+		whereClause, args,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get target records: %v", err)
+	}
+
+	return td.compareRecordSets(sourceRecords, targetRecords), nil
 }
 
 // mergeChunkReport aggregates a chunk report into the total report, keeping
@@ -495,42 +595,12 @@ func (td *TableDiffer) generateSyncSQL(report *DifferenceReport) error {
 	output.WriteString(fmt.Sprintf("-- Total differences: source_only=%d, target_only=%d, modified=%d\n\n",
 		report.SourceOnlyRecords, report.TargetOnlyRecords, report.ModifiedRecords))
 
-	sqlCount := 0
-	var syncableDiffs []RecordDifference
-	for _, diff := range report.SampleDifferences {
-		if diff.DifferenceType != "target_only" {
-			syncableDiffs = append(syncableDiffs, diff)
-		}
+	statements := td.BuildReplaceIntoStatements(report.SampleDifferences, allColumns)
+	for _, stmt := range statements {
+		output.WriteString(stmt)
+		output.WriteString("\n")
 	}
-
-	if len(syncableDiffs) > 0 {
-		batchSize := 1000
-		for i := 0; i < len(syncableDiffs); i += batchSize {
-			end := i + batchSize
-			if end > len(syncableDiffs) {
-				end = len(syncableDiffs)
-			}
-			batch := syncableDiffs[i:end]
-
-			pkBatch := make([]map[string]interface{}, len(batch))
-			for j, diff := range batch {
-				pkBatch[j] = diff.PrimaryKeyValues
-			}
-
-			rowsData, err := td.fetchFullRowDataBatch(pkBatch, allColumns)
-			if err != nil {
-				ctx.Context.Log.Warnf("Failed to fetch batch of full row data (batch size %d): %v", len(batch), err)
-				continue
-			}
-
-			for _, rowData := range rowsData {
-				replaceStmt := td.buildReplaceIntoStatement(rowData, allColumns)
-				output.WriteString(replaceStmt)
-				output.WriteString("\n")
-				sqlCount++
-			}
-		}
-	}
+	sqlCount := len(statements)
 
 	output.WriteString(fmt.Sprintf("\n-- Total REPLACE INTO statements generated: %d\n", sqlCount))
 
@@ -557,6 +627,55 @@ func (td *TableDiffer) generateSyncSQL(report *DifferenceReport) error {
 	}
 
 	return nil
+}
+
+// BuildReplaceIntoStatements fetches full row data for every syncable difference
+// (source_only and modified; target_only is never included -- this tool never
+// deletes, it only backfills/repairs rows that still exist on the source) and
+// returns ready-to-execute REPLACE INTO statements. allColumns should come
+// from ctx.GetAllColumns(): REPLACE INTO deletes and re-inserts the whole row,
+// so it must always cover every column, even when the checksum only compared
+// a subset via --check-column-names. A batch that fails to fetch is logged
+// and skipped rather than aborting the whole run, matching generateSyncSQL's
+// tolerance for partial results.
+func (td *TableDiffer) BuildReplaceIntoStatements(diffs []RecordDifference, allColumns *types.ColumnList) []string {
+	ctx := td.Context
+
+	var syncableDiffs []RecordDifference
+	for _, diff := range diffs {
+		if diff.DifferenceType != "target_only" {
+			syncableDiffs = append(syncableDiffs, diff)
+		}
+	}
+	if len(syncableDiffs) == 0 {
+		return nil
+	}
+
+	var statements []string
+	batchSize := 1000
+	for i := 0; i < len(syncableDiffs); i += batchSize {
+		end := i + batchSize
+		if end > len(syncableDiffs) {
+			end = len(syncableDiffs)
+		}
+		batch := syncableDiffs[i:end]
+
+		pkBatch := make([]map[string]interface{}, len(batch))
+		for j, diff := range batch {
+			pkBatch[j] = diff.PrimaryKeyValues
+		}
+
+		rowsData, err := td.fetchFullRowDataBatch(pkBatch, allColumns)
+		if err != nil {
+			ctx.Context.Log.Warnf("Failed to fetch batch of full row data (batch size %d): %v", len(batch), err)
+			continue
+		}
+
+		for _, rowData := range rowsData {
+			statements = append(statements, td.buildReplaceIntoStatement(rowData, allColumns))
+		}
+	}
+	return statements
 }
 
 // formatPrimaryKeyMap renders a primary key map for log messages

@@ -23,6 +23,8 @@ import (
 
 var AppVersion string
 
+var globalDifferentialUseTimeRange bool
+
 // ChecksumJob manages the checksum worker pool
 type ChecksumJob struct {
 	ChecksumJobChan chan int
@@ -198,6 +200,7 @@ func (job *ChecksumJob) ChecksumPerTable(baseContext *types.BaseContext, tableCo
 	ChecksumContext := checksum.NewChecksumContext(baseContext, tableContext)
 	ChecksumContext.JobTracker = job.Tracker
 	ChecksumContext.ComparisonID = tableContext.ComparisonID
+	ChecksumContext.DifferentialUseTimeRange = globalDifferentialUseTimeRange
 	ChecksumContext.TrackTableStart()
 	defer func() { ChecksumContext.TrackTableDone(isEqual, err) }()
 	baseContext.Log.Infof("Starting check table pair: %s.%s => %s.%s .", ChecksumContext.PerTableContext.SourceDatabaseName, ChecksumContext.PerTableContext.SourceTableName, ChecksumContext.PerTableContext.TargetDatabaseName, ChecksumContext.PerTableContext.TargetTableName)
@@ -316,6 +319,7 @@ func (job *ChecksumJob) ChecksumPerTableViaTimeColumn(baseContext *types.BaseCon
 	ChecksumContext := checksum.NewChecksumContext(baseContext, tableContext)
 	ChecksumContext.JobTracker = job.Tracker
 	ChecksumContext.ComparisonID = tableContext.ComparisonID
+	ChecksumContext.DifferentialUseTimeRange = globalDifferentialUseTimeRange
 	ChecksumContext.TrackTableStart()
 	defer func() { ChecksumContext.TrackTableDone(isEqual, err) }()
 	baseContext.Log.Infof("Starting check table pair: %s.%s => %s.%s .", ChecksumContext.PerTableContext.SourceDatabaseName, ChecksumContext.PerTableContext.SourceTableName, ChecksumContext.PerTableContext.TargetDatabaseName, ChecksumContext.PerTableContext.TargetTableName)
@@ -531,6 +535,7 @@ type ChecksumJSONConfig struct {
 	IsSupersetAsEqual           *bool   `json:"is-superset-as-equal,omitempty"`
 	IgnoreRowCountCheck         *bool   `json:"ignore-row-count-check,omitempty"`
 	Threads                     *int    `json:"threads,omitempty"`
+	DifferentialUseTimeRange    *bool   `json:"differential-use-time-range,omitempty"`
 	EnableTracking              *bool   `json:"enable-tracking,omitempty"`
 	TrackingDBHost              *string `json:"tracking-db-host,omitempty"`
 	TrackingDBPort              *int    `json:"tracking-db-port,omitempty"`
@@ -662,6 +667,9 @@ func loadChecksumConfig(path string, baseContext *types.BaseContext, specifiedTi
 	if !seen["threads"] && cfg.Threads != nil {
 		baseContext.ParallelThreads = *cfg.Threads
 	}
+	if !seen["differential-use-time-range"] && cfg.DifferentialUseTimeRange != nil {
+		globalDifferentialUseTimeRange = *cfg.DifferentialUseTimeRange
+	}
 	if !seen["enable-tracking"] && cfg.EnableTracking != nil {
 		baseContext.EnableTracking = *cfg.EnableTracking
 	}
@@ -729,6 +737,7 @@ func main() {
 	flag.BoolVar(&baseContext.IsSuperSetAsEqual, "is-superset-as-equal", false, "Shall we think that the records in target table is the superset of the source as equal? By default, we think the records are exactly equal as equal.")
 	flag.BoolVar(&baseContext.IgnoreRowCountCheck, "ignore-row-count-check", false, "Shall we ignore check by counting rows? Default: false")
 	flag.IntVar(&baseContext.ParallelThreads, "threads", 1, "Parallel threads of table checksum.")
+	flag.BoolVar(&globalDifferentialUseTimeRange, "differential-use-time-range", false, "Restrict differential analysis to the specified time range if defined")
 	flag.BoolVar(&baseContext.EnableTracking, "enable-tracking", false, "Persist job/table/chunk results to a tracking database (pt-table-checksum style).")
 	flag.StringVar(&baseContext.TrackingDBHost, "tracking-db-host", "", "Tracking MySQL hostname (default: target-db-host).")
 	flag.IntVar(&baseContext.TrackingDBPort, "tracking-db-port", 0, "Tracking MySQL port (default: target-db-port).")

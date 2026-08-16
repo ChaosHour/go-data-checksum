@@ -50,6 +50,8 @@ go build -o bin/go-data-sync cmd/sync/main.go
         debug mode (very verbose)
   -default-retries int
         Default number of retries for various operations before panicking (default 10)
+  -differential-use-time-range
+        Restrict differential analysis to the specified time range if defined
   -enable-differential-reporting
         Enable detailed differential reporting showing which records differ by primary key (default false)
   -enable-tracking
@@ -253,6 +255,29 @@ rows from the target requires a manual, reviewed DELETE.
   --ignore-row-count-check
 ```
 
+### 8. Recover a replica that fell behind a known point in time (go-data-nibble)
+```bash
+# The replica was down/lagging starting 2026-07-16. Only these three tables
+# actually drifted, and last_updated is indexed on both sides. Dry run first:
+./bin/go-data-nibble \
+  --source-db-host="prod.example.com"    --source-db-user="checker" --source-db-password="xxxx" \
+  --target-db-host="replica.example.com" --target-db-user="checker" --target-db-password="xxxx" \
+  --tables="app_db.orders,app_db.users,app_db.events" \
+  --specified-time-column="last_updated" \
+  --specified-time-begin="2026-07-16 00:00:00" \
+  --time-range-per-step=1h
+
+# Looks right — converge for real:
+./bin/go-data-nibble \
+  --source-db-host="prod.example.com"    --source-db-user="checker" --source-db-password="xxxx" \
+  --target-db-host="replica.example.com" --target-db-user="checker" --target-db-password="xxxx" \
+  --tables="app_db.orders,app_db.users,app_db.events" \
+  --specified-time-column="last_updated" \
+  --specified-time-begin="2026-07-16 00:00:00" \
+  --time-range-per-step=1h \
+  --execute
+```
+
 ## UNDERSTANDING DIFFERENTIAL OUTPUT
 
 ### Sample Output with --enable-differential-reporting
@@ -280,6 +305,19 @@ Notes:
   the source table's key range.
 - The analysis runs whenever a table pair is found unequal, including when the
   row-count pre-check already shows a mismatch.
+- **`--differential-use-time-range`**: on very large tables (hundreds of GB+),
+  a full-table primary-key rescan for differential analysis can be
+  impractical — this flag scopes it to the `--specified-time-begin`/
+  `--specified-time-end` window instead. It requires `--specified-time-column`
+  to be set and walks the window in `--time-range-per-step` chunks, querying
+  source and target directly by that time column (the same nibbling strategy
+  the main checksum loop uses for `--specified-time-column`), instead of
+  paginating the primary key. This matters most on tables where changed rows
+  are scattered across the whole key range rather than clustered at the end
+  (e.g. UPDATEs touching old rows) — without this flag, a PK-based
+  differential pass still has to walk most of the key range even when only a
+  small time window actually differs. Make sure the time column is indexed on
+  both sides, or each window becomes a full table scan.
 
 ### Explanation of Symbols
 - **`-` (minus)**: Records that exist in the source database but are missing in the target
@@ -529,6 +567,231 @@ Safety model:
 # 4. Re-verify
 ./bin/go-data-checksum ... --enable-differential-reporting
 ```
+
+## COMPANION CLI: go-data-nibble
+
+`go-data-nibble` (built alongside the other two binaries by `make build`)
+converges a handful of tables onto their source in one command, for the
+specific case of "a replica fell behind or was down from a known point in
+time, and only a few tables actually drifted." It repeatedly runs the same
+time-scoped differential analysis as `--differential-use-time-range` and
+applies the resulting `REPLACE INTO` statements, looping per table until no
+differences remain in the window (or `--max-iterations` is hit).
+
+> For a full internals deep-dive (exactly how the collect/apply/converge loop
+> works, what "source-only" vs "modified" actually means, and a step-by-step
+> testing/verification guide) see **[NIBBLE.md](NIBBLE.md)**.
+
+It is not a replacement for `go-data-checksum` + `go-data-sync` — it's a
+convenience wrapper around exactly that pipeline for a bounded recovery
+window, so you don't have to hand-run checksum/generate/apply/re-verify in a
+loop yourself. Reach for `go-data-checksum --enable-differential-reporting`
+when you don't already know the drift is time-bounded, or need the full
+tracking/resume machinery.
+
+```
+  -tables string
+        Comma-separated db.table list to converge, eg: sbtest.orders,sbtest.users
+        (required). Target db/table names are assumed identical to source.
+  -specified-time-column string
+        Time column to nibble by, eg: last_updated (required).
+  -specified-time-begin string
+        Start of the drift window, eg. when the replica fell behind (required).
+  -specified-time-end string
+        End of the drift window. Defaults to now, captured once at startup.
+  -time-range-per-step duration
+        Time window size per nibble step (default 5m0s).
+  -batch-diffs int
+        Max differences collected (and applied) per iteration (default 500).
+  -max-iterations int
+        Give up on a table after this many iterations without converging (default 50).
+  -execute
+        Actually apply the statements. Without this flag, runs one dry-run
+        analysis pass per table and exits (like go-data-sync).
+  -apply-batch-size int
+        Number of REPLACE INTO statements per transaction when applying (default 200).
+  -skip-binlog
+        Set @@session.sql_log_bin = 0 on the target connection. Recommended
+        when repairing a replica directly, so applied REPLACE INTOs don't
+        become errant GTID transactions on a GTID-enabled replica.
+  -skip-fk-checks
+        Set @@session.foreign_key_checks = 0 on the target connection.
+  -skip-unique-checks
+        Set @@session.unique_checks = 0 on the target connection.
+  -no-auto-value-on-zero
+        Set @@session.sql_mode = 'NO_AUTO_VALUE_ON_ZERO' on the target connection.
+  -config string
+        Path to a JSON configuration file (see nibble_config.example.json)
+```
+
+The four `-skip-*`/`-no-auto-value-on-zero` flags mirror `go-data-sync`'s
+flags of the same name and are all opt-in (default `false`) — only the target
+connection is affected, never the source. `--skip-binlog` in particular is
+worth turning on whenever you're repairing a replica directly, same reasoning
+as `go-data-sync`'s equivalent flag.
+
+Requirements and safety model:
+
+- The time column **must be indexed** on both sides, or every nibble step
+  becomes a full table scan — see `--differential-use-time-range` above for
+  why time-scoped chunking only pays off with an index.
+- **Dry-run by default** — one analysis pass per table, prints what would be
+  applied, nothing executed until `--execute`.
+- **Never deletes** — target-only rows (present on the target, no source
+  match) are logged loudly as warnings but never touched, exactly like
+  `go-data-checksum`'s sync SQL generation. If your workload does hard
+  `DELETE`s during the drift window, this tool alone will not fully converge
+  the tables; review target-only warnings manually.
+- Each iteration rescans the whole `[--specified-time-begin, --specified-time-end]`
+  window (already-converged sub-windows are cheap re-checks, not free), so
+  size `--batch-diffs` generously relative to the expected drift — a table
+  that converges in 1-2 passes is far cheaper than one that needs 50.
+
+**Option A: Command-line Flags**
+```bash
+# Dry run: see what a 15-day drift window would apply, per table
+./bin/go-data-nibble \
+  --source-db-host=primary.example.com --source-db-user=admin --source-db-password=xxx \
+  --target-db-host=replica.example.com --target-db-user=admin --target-db-password=xxx \
+  --tables=sbtest.orders,sbtest.users,sbtest.events \
+  --specified-time-column=last_updated \
+  --specified-time-begin='2026-07-16 00:00:00' \
+  --time-range-per-step=1h
+
+# Converge for real
+./bin/go-data-nibble \
+  --source-db-host=primary.example.com --source-db-user=admin --source-db-password=xxx \
+  --target-db-host=replica.example.com --target-db-user=admin --target-db-password=xxx \
+  --tables=sbtest.orders,sbtest.users,sbtest.events \
+  --specified-time-column=last_updated \
+  --specified-time-begin='2026-07-16 00:00:00' \
+  --time-range-per-step=1h \
+  --execute
+```
+
+**Option B: JSON Configuration**
+Two example configs are provided — they differ only in `execute` and in the
+tuning of `time-range-per-step`/`batch-diffs`/`max-iterations`:
+- `nibble_config.example.json` — `"execute": false`, a first dry-run pass.
+- `nibble_execute.example.json` — `"execute": true`, smaller time steps and a
+  higher diff batch/iteration cap, sized for converging a large table once
+  the dry run above looks right.
+
+```bash
+# 1. Dry run
+cp nibble_config.example.json nibble_config.json   # edit credentials/tables
+./bin/go-data-nibble --config="nibble_config.json"
+
+# 2. Converge for real
+cp nibble_execute.example.json nibble_execute.json # edit credentials/tables
+./bin/go-data-nibble --config="nibble_execute.json"
+```
+
+### Load-testing go-data-nibble at scale (scripts/nibble-loadtest.sh)
+
+Before pointing `go-data-nibble` at a real large table, use
+`scripts/nibble-loadtest.sh` to exercise it against a synthetic large table
+first and see real timing/convergence behavior. It reuses your **existing**
+primary/replica containers instead of spinning up throwaway ones, so it needs
+a running, healthy primary + replica pair to start with (defaults assume
+`127.0.0.1:3306` primary / `127.0.0.1:3307` replica, matching a
+`client_primary1`/`client_replica1` setup in `~/.my.cnf`).
+
+**What it does, in order:**
+1. Confirms the replica is healthy, then stops just its SQL thread (IO thread
+   keeps running — no relay log gap) and adds a `REPLICATE_IGNORE_DB` filter
+   scoped to a throwaway `nibbletest` schema, so nothing written to that
+   schema on the primary is auto-applied to the replica. Restarts the SQL
+   thread. **Your real schemas and their replication are never touched.**
+2. Creates `nibbletest` independently on both sides, seeds a large table on
+   the primary via a containerized `sysbench` (nothing installed on your
+   host), and clones it to the replica as MyISAM.
+3. Updates/inserts a batch of rows on the primary only — because of the
+   filter from step 1, these never reach the replica, simulating a replica
+   that fell behind.
+4. Runs `go-data-nibble` dry-run, then `--execute`, timing each pass, then
+   verifies convergence with one more dry run.
+5. **Always** drops `nibbletest` on both sides and restores the replication
+   filter to exactly what it was before — even on failure or Ctrl-C.
+
+**Usage:**
+```bash
+# Quick smoke test
+scripts/nibble-loadtest.sh --table-size 50000 --drift-updates 2000 --drift-inserts 200
+
+# Realistic scale (this is what we validated: 2M rows, 55k drifted,
+# converged in 12 iterations, ~153s to execute)
+scripts/nibble-loadtest.sh \
+  --table-size 2000000 --drift-updates 50000 --drift-inserts 5000 \
+  --time-range-per-step 15m
+
+# Keep the test schema around afterward to inspect it manually
+# (the replication filter is still always restored)
+scripts/nibble-loadtest.sh --table-size 50000 --keep
+```
+Run `scripts/nibble-loadtest.sh --help` for the full flag list
+(`--primary-host`/`--primary-port`/`--replica-host`/`--replica-port`/
+`--db-user`/`--batch-diffs`/`--max-iterations`).
+
+**Requirements:** `docker` (only for containerized `sysbench` — nothing else
+runs in a container), plus local `mysql`/`mysqldump` clients. Reads
+`PRIMARY_DB_PASSWORD` from the environment, or falls back to the `password=`
+line under `[client]` in `~/.my.cnf`; never printed.
+
+**What to watch for:**
+- **The script refuses to run against an unhealthy replica.** It checks
+  `Replica_IO_Running`/`Replica_SQL_Running` before touching anything and
+  fails fast if either isn't `Yes` — don't work around this, fix replication
+  first.
+- **Server/host timezone mismatch.** If your MySQL containers run in a
+  different timezone than your host (ours run UTC), `go-data-nibble`'s
+  default `--specified-time-end` (host-local `time.Now()`) can land *before*
+  a `--specified-time-begin` derived from the server's own `NOW()`, producing
+  an "illegal time range" error. This script sidesteps it by pulling both
+  window bounds from the primary's own clock — do the same for real runs if
+  the tool's host and DB server timezones differ.
+- **A zero-width time window silently reports false convergence.** If
+  `--specified-time-begin`/`--specified-time-end` end up equal (or very
+  close), `go-data-nibble` finds nothing to compare and reports "converged"
+  even though real drift exists. The script guards against this by asserting
+  the first dry-run pass actually finds the injected drift, not just that the
+  final one converges — worth the same sanity check on a real run: if a dry
+  run against a table you know has drifted reports 0 differences, suspect the
+  window bounds before trusting it.
+- **GTID + `mysqldump` on an already-replicating server.** Dumping a single
+  schema/table from a GTID-enabled primary and loading it into a replica that
+  already has its own `GTID_EXECUTED` set fails
+  (`@@GLOBAL.GTID_PURGED cannot be changed...`) unless the dump is taken with
+  `--set-gtid-purged=OFF`. The script already does this; keep it in mind if
+  you adapt the cloning step for a real table.
+- **`--keep` only keeps the schema/user** — the replication filter is
+  *always* restored regardless of `--keep`, on success or failure. If a run
+  is interrupted (Ctrl-C, crash) before cleanup runs at all, check
+  `SHOW REPLICA STATUS` for a lingering `Replicate_Ignore_DB` filter and clear
+  it manually with `CHANGE REPLICATION FILTER REPLICATE_IGNORE_DB = ();`
+  (stop the SQL thread first).
+- **Don't run two instances concurrently** against the same
+  primary/replica — they'd fight over the same `nibbletest` schema and
+  replication filter.
+
+**Other implementations of the same load test:** the bash script above is the
+original; the following are equivalent ports (same options, same behavior,
+same "what to watch for" list applies to all of them) for whichever shell/
+language you'd rather use:
+
+| Variant | Path | Run with |
+|---|---|---|
+| bash (original) | `scripts/nibble-loadtest.sh` | `scripts/nibble-loadtest.sh [options]` |
+| zsh | `scripts/nibble-loadtest.zsh` | `scripts/nibble-loadtest.zsh [options]` |
+| Python 3 (via [uv](https://docs.astral.sh/uv/)) | `scripts/nibble_loadtest.py` | `uv run scripts/nibble_loadtest.py [options]` |
+| Go | `cmd/nibbleloadtest/main.go` | `./bin/go-data-nibble-loadtest [options]` (built by `make build`) |
+
+The Python version needs no manual setup — it declares its one dependency
+(`pymysql`) via inline script metadata, and `uv run` creates an ephemeral venv
+and installs it automatically on first run. The Go version is a normal binary
+built alongside the other three (`go-data-checksum`, `go-data-sync`,
+`go-data-nibble`) by `make build`; run it from the repo root, or pass
+`-repo-root <path>` if not.
 
 ## Testing
 
@@ -814,4 +1077,30 @@ Copy `sync_apply.example.json` to `sync_apply.json`, edit your target connection
 ./bin/go-data-sync --config="sync_apply.json"
 ```
 
+---
+
+### 4. Alternative: recovering a known drift window in one command (go-data-nibble)
+
+Steps 1-3 are the general checksum → generate → apply → re-verify workflow
+for the whole table. If instead you know *when* the drift started (a replica
+outage, a paused replication thread) and only a handful of tables are
+affected, `go-data-nibble` folds steps 1-3 into a single per-table loop that
+repeats until converged — see "COMPANION CLI: go-data-nibble" above.
+
+**Option A: Command-line Flags**
+```bash
+./bin/go-data-nibble \
+  --source-db-host="${SOURCE_HOST}" --source-db-user="${DB_USER}" --source-db-password="${SOURCE_DB_PASS}" \
+  --target-db-host="${TARGET_HOST}" --target-db-user="${DB_USER}" --target-db-password="${TARGET_DB_PASS}" \
+  --tables="${DB_NAME}.${SOURCE_TB_NAME}" \
+  --specified-time-column="last_updated" \
+  --specified-time-begin="2026-07-16 00:00:00" \
+  --time-range-per-step=1h \
+  --execute
+```
+
+**Option B: JSON Configuration**
+Copy `nibble_execute.example.json` to `nibble_execute.json`, edit your credentials, tables, and drift window, and run:
+```bash
+./bin/go-data-nibble --config="nibble_execute.json"
 ```

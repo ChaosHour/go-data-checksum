@@ -54,6 +54,8 @@ type ChecksumContext struct {
 	chunksEqual        int
 	chunksDifferent    int
 	chunksError        int
+
+	DifferentialUseTimeRange bool
 }
 
 // NewChecksumContext(context *types.BaseContext, perTableContext *types.TableContext) *ChecksumContext {

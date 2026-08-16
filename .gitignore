@@ -51,3 +51,7 @@ PLAN.md
 graphify-out/
 
 tags
+
+# Python bytecode cache (scripts/nibble_loadtest.py, run via uv)
+__pycache__/
+*.pyc
